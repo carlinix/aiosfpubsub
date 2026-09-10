@@ -10,6 +10,11 @@ from .auth import (
     PasswordAuthenticator,
     RefreshTokenAuthenticator,
 )
+from .cdc import (
+    expand_bitmap,
+    expand_bitmap_fields,
+    expand_change_event_header,
+)
 from .client import (
     ManagedSubscription,
     ReplayMarkerStoragePolicy,
@@ -56,6 +61,9 @@ __all__ = [
     "SalesforcePubSubClient",
     "SchemaError",
     "__version__",
+    "expand_bitmap",
+    "expand_bitmap_fields",
+    "expand_change_event_header",
 ]
 
 # Create a default handler to avoid warnings in applications without logging

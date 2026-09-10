@@ -17,6 +17,7 @@ import grpc
 from . import pubsub_api_pb2 as pb2
 from . import pubsub_api_pb2_grpc as pb2_grpc
 from .auth import AuthenticatorBase
+from .cdc import expand_change_event_header
 from .exceptions import (
     AuthenticationError,
     ClientError,
@@ -172,6 +173,7 @@ class SalesforcePubSubClient:
             ReplayMarkerStoragePolicy.AUTOMATIC
         ),
         replay_fallback: ReplayOption | None = None,
+        expand_change_event_header: bool = False,
         num_requested: int = DEFAULT_NUM_REQUESTED,
         auth_retries: int = DEFAULT_AUTH_RETRIES,
         reconnect_retries: int = DEFAULT_RECONNECT_RETRIES,
@@ -196,6 +198,10 @@ class SalesforcePubSubClient:
         no longer valid, typically because it fell outside the event \
         retention window. Without it, such a rejection is raised as a \
         :obj:`~.ClientError`.
+        :param expand_change_event_header: Whether to replace the bitmaps in \
+        the ``ChangeEventHeader`` of a Change Data Capture event with the \
+        field names they stand for. Off by default, because it rewrites the \
+        decoded payload. See :mod:`~simple_salesforce_pubsub.cdc`.
         :param num_requested: The number of events to request from the \
         server at a time. The subscription iterators replenish this budget \
         as events are consumed, which is what applies backpressure.
@@ -238,6 +244,8 @@ class SalesforcePubSubClient:
         self.replay_storage_policy = replay_storage_policy
         #: Replay option to fall back on when a replay id gets rejected
         self.replay_fallback = replay_fallback
+        #: Whether Change Data Capture header bitmaps are expanded into names
+        self.expand_change_event_header = expand_change_event_header
         #: The number of events requested from the server at a time
         self.num_requested = num_requested
         #: Consecutive re-authentication attempts allowed before giving up
@@ -381,10 +389,14 @@ class SalesforcePubSubClient:
     async def _decode_event(self, consumer_event: pb2.ConsumerEvent) -> Event:
         """Decode a *consumer_event* into the mapping yielded to the consumer
 
-        :raise SchemaError: If the schema can't be fetched or parsed
+        :raise SchemaError: If the schema can't be fetched or parsed, or if a \
+        change event bitmap can't be expanded against it
         """
         schema_id = consumer_event.event.schema_id
         schema = await self.get_schema(schema_id)
+        payload = self._decode_payload(schema, consumer_event.event.payload)
+        if self.expand_change_event_header:
+            expand_change_event_header(schema, payload)
         return {
             "replay_id": consumer_event.replay_id,
             "id": consumer_event.event.id,
@@ -392,7 +404,7 @@ class SalesforcePubSubClient:
             "headers": {
                 header.key: header.value for header in consumer_event.event.headers
             },
-            "payload": self._decode_payload(schema, consumer_event.event.payload),
+            "payload": payload,
         }
 
     async def commit_replay(self, topic_name: str, replay_id: bytes) -> None:

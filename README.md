@@ -16,6 +16,7 @@ older Salesforce Streaming API (CometD).
 - Two replay strategies: client-side replay marker storage, or Salesforce's
   own managed event subscriptions.
 - Replay fallback for replay ids that aged out of the retention window.
+- Change Data Capture header bitmaps expanded into field names.
 - Streaming publish, and cancellable subscriptions.
 - Authenticators matching `aiosfstream` for easy migration, including the
   OAuth 2.0 Client Credentials flow.
@@ -123,6 +124,24 @@ client = SalesforcePubSubClient(
 The Pub/Sub API has no error code for this condition, so it is recognised from
 the gRPC status. Override `SalesforcePubSubClient.is_replay_id_error()` if the
 server wording changes.
+
+### Change Data Capture
+
+A CDC event reports the fields that changed as bitmaps over the event schema,
+not as names. Pass `expand_change_event_header=True` to get names instead:
+
+```python
+client = SalesforcePubSubClient(auth, expand_change_event_header=True)
+
+async for event in client.subscribe("/data/AccountChangeEvent"):
+    print(event["payload"]["ChangeEventHeader"]["changedFields"])
+    # ["Name", "BillingAddress.Street"]
+```
+
+It is off by default because it rewrites the decoded payload, and it is safe
+to leave on for a client subscribed to platform events too. The underlying
+`expand_change_event_header()`, `expand_bitmap_fields()` and `expand_bitmap()`
+are exported for use on payloads decoded elsewhere.
 
 ### Reconnection
 

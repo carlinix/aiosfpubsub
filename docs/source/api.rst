@@ -45,6 +45,19 @@ Replay
 
 .. autoclass:: ConstantReplayId
 
+Change Data Capture
+-------------------
+
+.. automodule:: simple_salesforce_pubsub.cdc
+
+.. py:currentmodule:: simple_salesforce_pubsub
+
+.. autofunction:: expand_change_event_header
+
+.. autofunction:: expand_bitmap_fields
+
+.. autofunction:: expand_bitmap
+
 Exceptions
 ----------
 

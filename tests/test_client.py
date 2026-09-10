@@ -1479,3 +1479,73 @@ async def test_a_stream_closed_before_any_response_cannot_anchor(client):
         pass
 
     assert reopened.requests[0].replay_preset == pb2.LATEST
+
+
+CHANGE_EVENT_SCHEMA = {
+    "type": "record",
+    "name": "AccountChangeEvent",
+    "fields": [
+        {
+            "name": "ChangeEventHeader",
+            "type": {
+                "type": "record",
+                "name": "ChangeEventHeader",
+                "fields": [
+                    {
+                        "name": "changedFields",
+                        "type": {"type": "array", "items": "string"},
+                    }
+                ],
+            },
+        },
+        {"name": "Name", "type": ["null", "string"]},
+    ],
+}
+
+
+def change_event(client, schema_id="schema-cdc"):
+    """Return a ConsumerEvent whose header marks the Name field as changed"""
+    schema = fastavro.parse_schema(CHANGE_EVENT_SCHEMA)
+    client._schema_cache[schema_id] = schema
+    payload = io.BytesIO()
+    fastavro.schemaless_writer(
+        payload,
+        schema,
+        {"ChangeEventHeader": {"changedFields": ["0x02"]}, "Name": None},
+    )
+    return pb2.ConsumerEvent(
+        event=pb2.ProducerEvent(
+            id="evt", schema_id=schema_id, payload=payload.getvalue()
+        ),
+        replay_id=b"\x01",
+    )
+
+
+@pytest.mark.asyncio
+async def test_change_event_bitmaps_are_left_alone_by_default(client):
+    client.stub.Subscribe = CallStub([fetch_response([change_event(client)])])
+
+    event = await anext(client.subscribe("/data/AccountChangeEvent"))
+
+    assert event["payload"]["ChangeEventHeader"]["changedFields"] == ["0x02"]
+
+
+@pytest.mark.asyncio
+async def test_change_event_bitmaps_are_expanded_when_asked(client):
+    client.expand_change_event_header = True
+    client.stub.Subscribe = CallStub([fetch_response([change_event(client)])])
+
+    event = await anext(client.subscribe("/data/AccountChangeEvent"))
+
+    assert event["payload"]["ChangeEventHeader"]["changedFields"] == ["Name"]
+
+
+@pytest.mark.asyncio
+async def test_expanding_leaves_a_platform_event_untouched(client):
+    """The option is safe to leave on for a client subscribed to both"""
+    client.expand_change_event_header = True
+    client.stub.Subscribe = CallStub([fetch_response([consumer_event(b"\x01")])])
+
+    event = await anext(client.subscribe("/event/X__e"))
+
+    assert event["payload"] == {}

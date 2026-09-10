@@ -166,6 +166,52 @@ Managed subscriptions need no fallback: if a committed replay id is invalid,
 retrying restarts the subscription from the ``errorRecoveryReplay`` value
 configured on the ``ManagedEventSubscription`` record in your org.
 
+Change Data Capture
+-------------------
+
+A Change Data Capture event does not name the fields that changed. Its
+``ChangeEventHeader`` reports them as bitmaps over the event schema's own
+field list, so a decoded payload looks like this:
+
+.. code-block:: python
+
+    {"ChangeEventHeader": {"changedFields": ["0x02", "2-0x01"], ...}, ...}
+
+``"0x02"`` is a hexadecimal bitmap of the top level fields, least significant
+bit first, so bit *n* stands for the *n*-th field of the event record.
+``"2-0x01"`` is a compound field: the number is the position of the parent
+field, and the bitmap that follows covers the fields of the nested record.
+
+Pass ``expand_change_event_header=True`` to have the client replace all three
+bitmap lists with the names they stand for:
+
+.. code-block:: python
+
+    client = SalesforcePubSubClient(auth, expand_change_event_header=True)
+
+    async for event in client.subscribe("/data/AccountChangeEvent"):
+        print(event["payload"]["ChangeEventHeader"]["changedFields"])
+        # ["Name", "BillingAddress.Street"]
+
+It is off by default because it rewrites the decoded payload, and it is safe
+to leave on for a client that also subscribes to platform events: a payload
+without a ``ChangeEventHeader`` is left untouched.
+
+The functions behind it are public, for expanding a payload you decoded some
+other way:
+
+.. code-block:: python
+
+    from simple_salesforce_pubsub import expand_change_event_header
+
+    schema = await client.get_schema(event["schema_id"])
+    expand_change_event_header(schema, event["payload"])
+
+:func:`~simple_salesforce_pubsub.expand_bitmap_fields` expands one bitmap list
+and :func:`~simple_salesforce_pubsub.expand_bitmap` a single bitmap against a
+given field list. All three raise :obj:`~exceptions.SchemaError` if a bitmap
+cannot be expanded against the schema, rather than returning a partial answer.
+
 Flow control
 ------------
 

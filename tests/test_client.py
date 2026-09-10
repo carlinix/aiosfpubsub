@@ -12,6 +12,7 @@ from simple_salesforce_pubsub.auth import AuthenticatorBase
 from simple_salesforce_pubsub.client import (
     ReplayMarkerStoragePolicy,
     SalesforcePubSubClient,
+    _StreamSlot,
 )
 from simple_salesforce_pubsub.exceptions import (
     AuthenticationError,
@@ -877,3 +878,113 @@ def test_managed_subscription_repr(client):
     assert repr(subscription) == (
         "ManagedSubscription(subscription_id='', developer_name='sub')"
     )
+
+
+@pytest.mark.asyncio
+async def test_managed_subscription_is_registered_and_released(client):
+    client.stub.ManagedSubscribe = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])]
+    )
+
+    subscription = client.managed_subscribe(developer_name="sub")
+    assert client.subscriptions == frozenset()
+
+    events = subscription.__aiter__()
+    await anext(events)
+    assert client.subscriptions == frozenset({"sub"})
+
+    await events.aclose()
+    assert client.subscriptions == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_managed_subscription_cancel_ends_the_iteration(client):
+    call = CallStub(
+        [
+            pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")]),
+            pb2.ManagedFetchResponse(events=[consumer_event(b"\x02")]),
+        ]
+    )
+    client.stub.ManagedSubscribe = call
+
+    subscription = client.managed_subscribe(subscription_id="sub-id")
+    events = []
+    async for event in subscription:
+        events.append(event)
+        assert subscription.cancel() is True
+
+    assert [event["replay_id"] for event in events] == [b"\x01"]
+    assert call.cancelled
+    assert subscription.cancel() is False
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_managed_subscriptions(client):
+    call = CallStub(
+        [
+            pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")]),
+            pb2.ManagedFetchResponse(events=[consumer_event(b"\x02")]),
+        ]
+    )
+    client.stub.ManagedSubscribe = call
+    client.channel = MagicMock(close=AsyncMock())
+
+    events = client.managed_subscribe(developer_name="sub").__aiter__()
+    await anext(events)
+    await client.close()
+
+    assert call.cancelled
+    assert client.subscriptions == frozenset()
+    assert [event async for event in events] == []
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribing_twice_under_the_same_name_is_rejected(client):
+    client.stub.ManagedSubscribe = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])]
+    )
+
+    events = client.managed_subscribe(developer_name="sub").__aiter__()
+    await anext(events)
+
+    with pytest.raises(ClientInvalidOperation, match="Already subscribed"):
+        await anext(client.managed_subscribe(developer_name="sub").__aiter__())
+
+    await events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_subscription_does_not_deregister_a_newer_one(client):
+    """The registry is keyed by name, so entries are released by identity
+
+    An abandoned generator only runs its cleanup when it is closed, which can
+    happen after the same topic has been subscribed to again.
+    """
+    client.stub.Subscribe = call_sequence(
+        CallStub([fetch_response([consumer_event(b"\x01")])]),
+        CallStub([fetch_response([consumer_event(b"\x02")])]),
+    )
+
+    abandoned = client.subscribe("/event/X__e")
+    await anext(abandoned)
+    client.unsubscribe("/event/X__e")
+
+    current = client.subscribe("/event/X__e")
+    await anext(current)
+    await abandoned.aclose()
+
+    assert client.subscriptions == frozenset({"/event/X__e"})
+    assert client.unsubscribe("/event/X__e") is True
+
+    await current.aclose()
+
+
+def test_stream_slot_cancel_before_a_stream_is_open():
+    """A slot is reserved before the stream exists, so cancelling is safe"""
+    slot = _StreamSlot()
+
+    slot.cancel()
+
+    slot.call = MagicMock()
+    slot.cancel()
+    slot.call.cancel.assert_called_once_with()

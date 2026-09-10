@@ -39,7 +39,9 @@ Names and argument shapes mirror `aiosfstream` wherever the semantics survive th
 
 ### Subscription lifecycle
 
-`subscribe()` registers its gRPC call in `client._streams`, keyed by topic. `unsubscribe(topic_name)` cancels that call, which surfaces as `CANCELLED` and ends the generator normally for its consumer; `close()` cancels every active stream. Subscribing twice to the same topic raises `ClientInvalidOperation` — the registry is keyed by topic, and two streams on one topic would fight over the same replay marker. `client.subscriptions` exposes the active set.
+Both `subscribe()` and `ManagedSubscription.__aiter__()` register a `_StreamSlot` in `client._streams` — keyed by topic name for the former, by `subscription_id or developer_name` for the latter. `unsubscribe(name)` cancels the slot's call, which surfaces as `CANCELLED` and ends the generator normally for its consumer; `ManagedSubscription.cancel()` is the same thing under its own name; `close()` cancels every registered slot. Registering twice under one name raises `ClientInvalidOperation`, since two streams sharing a name would fight over the same replay position. `client.subscriptions` exposes the active set.
+
+The slot indirection is not decoration. Entries are released **by identity** (`if self._streams.get(name) is slot`), because an abandoned generator runs its cleanup only when it is closed — potentially after the same name has been subscribed to again. Releasing by key alone would deregister the newer subscription and leave it uncancellable. A slot is also reserved before its call exists, so `_StreamSlot.cancel()` tolerates a missing call.
 
 This is not the multiplexing `aiosfstream` had, and it can't be: CometD carried every channel over one connection, whereas the Pub/Sub API gives one bidirectional stream per `Subscribe` call. Each topic costs a stream.
 
@@ -81,5 +83,5 @@ venv/bin/python -m grpc_tools.protoc -I<proto_dir> \
 ## Remaining gaps
 
 - **No Sphinx docs and no `uv_build` migration.** The sibling has both, plus `uv.lock` and GitHub Actions workflows.
-- **`ManagedSubscription` has no re-auth path.** `subscribe()` re-establishes itself on `UNAUTHENTICATED`; the managed path propagates it as a `ClientError`. The server holds the position, so a caller can simply re-iterate, but the asymmetry is real.
+- **`ManagedSubscription` has no re-auth path.** `subscribe()` re-establishes itself on `UNAUTHENTICATED`; the managed path propagates it as a `ClientError`. The server holds the position, so a caller can simply iterate again, but the asymmetry is real.
 - **`publish()` and `publish_stream()` don't inspect `PublishResult.error`.** A per-record failure is reported in the response, not raised.

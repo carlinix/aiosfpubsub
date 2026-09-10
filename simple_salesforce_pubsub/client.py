@@ -71,6 +71,24 @@ class _SubscriptionCancelled(Exception):
     :meth:`SalesforcePubSubClient.unsubscribe` or by closing the client"""
 
 
+class _StreamSlot:
+    """The registry entry for one active stream
+
+    Held per subscription rather than per topic, so that the cleanup of an
+    abandoned subscription can't deregister a newer one that has taken over
+    the same name. The call is attached once the stream is opened, which is
+    later than the slot is reserved.
+    """
+
+    def __init__(self) -> None:
+        self.call: Any = None
+
+    def cancel(self) -> None:
+        """Cancel the stream, if one is open"""
+        if self.call is not None:
+            self.call.cancel()
+
+
 class _ResumePosition:
     """Tracks the position a subscription should be re-established from
 
@@ -204,7 +222,7 @@ class SalesforcePubSubClient:
         self.channel: grpc.aio.Channel | None = None
         self.stub: pb2_grpc.PubSubStub | None = None
         self._schema_cache: dict[str, Any] = {}
-        self._streams: dict[str, Any] = {}
+        self._streams: dict[str, _StreamSlot] = {}
 
     async def open(self) -> None:
         """Authenticate and establish a connection with the Pub/Sub API
@@ -228,11 +246,11 @@ class SalesforcePubSubClient:
     async def close(self) -> None:
         """Close the connection with the Pub/Sub API
 
-        Every active :meth:`subscribe` stream is cancelled, so the consumers
-        iterating them stop.
+        Every active subscription is cancelled, so the consumers iterating
+        them stop.
         """
-        for topic_name in list(self._streams):
-            self.unsubscribe(topic_name)
+        for name in list(self._streams):
+            self.unsubscribe(name)
         if self.channel:
             await self.channel.close()
             self.channel = None
@@ -387,6 +405,8 @@ class SalesforcePubSubClient:
         state = _ResumePosition(
             await self.replay_storage.get_fetch_position(topic_name)
         )
+        slot = _StreamSlot()
+        self._streams[topic_name] = slot
         auth_refresh = ""
         attempts = 0
         fallback_used = False
@@ -395,7 +415,7 @@ class SalesforcePubSubClient:
                 delivered = False
                 try:
                     async for event in self._subscribe_once(
-                        topic_name, budget, auth_refresh, state
+                        topic_name, budget, auth_refresh, state, slot
                     ):
                         delivered = True
                         yield event
@@ -434,7 +454,8 @@ class SalesforcePubSubClient:
                     await self.replay_storage.clear_replay_marker(topic_name)
                     state.restart((fallback.value, b""))
         finally:
-            self._streams.pop(topic_name, None)
+            if self._streams.get(topic_name) is slot:
+                del self._streams[topic_name]
 
     async def _subscribe_once(
         self,
@@ -442,6 +463,7 @@ class SalesforcePubSubClient:
         num_requested: int,
         auth_refresh: str,
         state: _ResumePosition,
+        slot: _StreamSlot,
     ) -> AsyncGenerator[Event, None]:
         """Run a single ``Subscribe`` stream until it ends or fails
 
@@ -467,7 +489,7 @@ class SalesforcePubSubClient:
                 yield await requests.get()
 
         call = stub.Subscribe(request_generator(), metadata=self._get_metadata())
-        self._streams[topic_name] = call
+        slot.call = call
         automatic = self.replay_storage_policy is ReplayMarkerStoragePolicy.AUTOMATIC
         try:
             async for response in call:
@@ -525,24 +547,25 @@ class SalesforcePubSubClient:
             return False
         return "replay" in (error.details() or "").lower()
 
-    def unsubscribe(self, topic_name: str) -> bool:
-        """Stop the subscription to *topic_name*
+    def unsubscribe(self, name: str) -> bool:
+        """Stop the subscription registered under *name*
 
-        The generator returned by :meth:`subscribe` stops iterating, so its
-        consumer's ``async for`` loop ends normally.
+        The generator being iterated stops, so its consumer's ``async for``
+        loop ends normally.
 
-        :param topic_name: Name of the subscribed topic
+        :param name: A topic name for a :meth:`subscribe` stream, or the \
+        subscription id or developer name of a :meth:`managed_subscribe` one
         :return: Whether there was a subscription to stop
         """
-        call = self._streams.pop(topic_name, None)
-        if call is None:
+        slot = self._streams.pop(name, None)
+        if slot is None:
             return False
-        call.cancel()
+        slot.cancel()
         return True
 
     @property
     def subscriptions(self) -> frozenset[str]:
-        """Names of the topics with an active :meth:`subscribe` stream"""
+        """Names under which subscriptions are currently registered"""
         return frozenset(self._streams)
 
     def managed_subscribe(
@@ -679,7 +702,10 @@ class ManagedSubscription:
         self.developer_name = developer_name
         #: The number of events requested from the server at a time
         self.num_requested = num_requested
+        #: The name this subscription is registered under on the client
+        self.name = subscription_id or developer_name
         self._requests: asyncio.Queue[pb2.ManagedFetchRequest] = asyncio.Queue()
+        self._slot = _StreamSlot()
         #: Commit responses received from the server, keyed by request id
         self.commit_responses: dict[str, pb2.CommitReplayResponse] = {}
 
@@ -690,6 +716,16 @@ class ManagedSubscription:
             f"{cls_name}(subscription_id={self.subscription_id!r}, "
             f"developer_name={self.developer_name!r})"
         )
+
+    def cancel(self) -> bool:
+        """Stop the subscription
+
+        Equivalent to calling :meth:`SalesforcePubSubClient.unsubscribe` with
+        this subscription's :obj:`name`.
+
+        :return: Whether there was a stream to stop
+        """
+        return self.client.unsubscribe(self.name)
 
     async def commit(self, replay_id: bytes) -> str:
         """Ask Salesforce to store *replay_id* as the subscription's position
@@ -714,12 +750,18 @@ class ManagedSubscription:
     async def __aiter__(self) -> AsyncGenerator[Event, None]:
         """Iterate over the decoded events of the managed subscription
 
-        :raise ClientInvalidOperation: If the client is not open
+        :raise ClientInvalidOperation: If the client is not open, or if a \
+        subscription is already registered under this one's :obj:`name`
         :raise ClientError: If the subscription gets rejected by the server
         :raise SchemaError: If an event's schema can't be fetched or parsed
         """
         client = self.client
         stub = client._get_stub()
+        if self.name in client._streams:
+            raise ClientInvalidOperation(
+                f"Already subscribed to {self.name!r}. Call unsubscribe() first."
+            )
+        client._streams[self.name] = self._slot
         num_requested = self.num_requested
 
         async def request_generator() -> AsyncIterator[pb2.ManagedFetchRequest]:
@@ -731,14 +773,13 @@ class ManagedSubscription:
             while True:
                 yield await self._requests.get()
 
-        responses = stub.ManagedSubscribe(
+        call = stub.ManagedSubscribe(
             request_generator(), metadata=client._get_metadata()
         )
-        automatic = (
-            client.replay_storage_policy is ReplayMarkerStoragePolicy.AUTOMATIC
-        )
+        self._slot.call = call
+        automatic = client.replay_storage_policy is ReplayMarkerStoragePolicy.AUTOMATIC
         try:
-            async for response in responses:
+            async for response in call:
                 if response.HasField("commit_response"):
                     commit_response = response.commit_response
                     self.commit_responses[commit_response.commit_request_id] = (
@@ -753,6 +794,11 @@ class ManagedSubscription:
                         pb2.ManagedFetchRequest(num_requested=num_requested)
                     )
         except grpc.aio.AioRpcError as error:
+            if error.code() is grpc.StatusCode.CANCELLED:
+                return
             raise ClientError(
                 f"Managed subscribe failed: {error.details()}"
             ) from error
+        finally:
+            if client._streams.get(self.name) is self._slot:
+                del client._streams[self.name]

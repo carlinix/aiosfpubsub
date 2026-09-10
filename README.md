@@ -130,8 +130,10 @@ server wording changes.
 client.unsubscribe("/event/Your_Platform_Event__e")
 ```
 
-The `async for` loop consuming that topic ends normally. Closing the client
-stops every active subscription. `client.subscriptions` lists them.
+The `async for` loop consuming that topic ends normally. A managed
+subscription stops the same way, through `subscription.cancel()` or
+`client.unsubscribe(subscription.name)`. Closing the client stops every active
+subscription, and `client.subscriptions` lists them.
 
 ### Publishing
 

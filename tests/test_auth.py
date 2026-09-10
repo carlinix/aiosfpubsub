@@ -258,7 +258,9 @@ def jwt_authenticator():
 
 def test_jwt_authenticator_reads_the_private_key_from_a_path(tmp_path):
     key_file = tmp_path / "server.key"
-    key_file.write_text(PRIVATE_KEY)
+    # Written as bytes: write_text would translate the newlines on Windows,
+    # and the key is read back verbatim with read_bytes.
+    key_file.write_bytes(PRIVATE_KEY.encode())
 
     authenticator = JWTBearerAuthenticator(
         consumer_key="key", username="user@example.com", private_key_path=key_file

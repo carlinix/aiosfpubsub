@@ -11,11 +11,12 @@ venv/bin/python -m pip install -e ".[dev]"   # editable install with test extras
 venv/bin/python -m pytest                    # run the suite
 venv/bin/python -m pytest -k replenish       # single test by name pattern
 venv/bin/python -m pytest tests/test_client.py::test_publish_wraps_rpc_errors
+venv/bin/python -m ruff check .              # lint
+venv/bin/python -m coverage run -m pytest    # tests with branch coverage
+venv/bin/python -m coverage report
 ```
 
-`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`.
-
-No linter or formatter is configured or installed *here* — do not invent commands. See "Conventions" below for the standard this project is expected to adopt.
+`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from both ruff and coverage. `ruff format` is deliberately **not** used — the sibling project lints without formatting, and `E` already enforces the line length.
 
 ## Architecture
 
@@ -27,7 +28,7 @@ Names and argument shapes mirror `aiosfstream` wherever the semantics survive th
 
 ### Conventions come from the sibling project
 
-`/home/ricardo-sperandio/Projects/aiosfstream/pyproject.toml` is the house style and the target for this project: `uv_build` backend, ruff (`line-length = 88`, `select = [ANN, ASYNC, B, C4, E, F, I, SIM, UP]`, `target-version = "py311"`), branch coverage, a `py.typed` marker, and Sphinx docs. Only the pytest half of that config has been adopted here so far; ruff, coverage, `py.typed` and uv have not.
+`/home/ricardo-sperandio/Projects/aiosfstream/pyproject.toml` is the house style. Adopted here: ruff (`line-length = 88`, `select = [ANN, ASYNC, B, C4, E, F, I, SIM, UP]`, `ignore = [ANN401]`, `target-version = "py311"`), pytest (`--strict-config --strict-markers -ra`, `asyncio_mode = "strict"`), branch coverage, and the `py.typed` marker. Still on the sibling and not here: the `uv_build` backend with `uv.lock` (this project still uses setuptools), Sphinx docs, and the GitHub Actions workflows.
 
 ### Modules
 
@@ -35,6 +36,12 @@ Names and argument shapes mirror `aiosfstream` wherever the semantics survive th
 - `replay.py` — client-side replay position tracking, ported from `aiosfstream.replay`. **The port is not mechanical**: the Streaming API had an ordered integer replay id plus a message creation date, which let it discard replayed messages by comparing dates. Pub/Sub replay ids are opaque `bytes` — not ordered, not comparable — and no creation date exists outside the Avro payload, so `ReplayMarker`, `get_message_date` and the staleness check have no counterpart. Markers are stored unconditionally; the `Subscribe` stream itself guarantees ordering. `get_fetch_position()` is the seam the client uses: a stored marker becomes `(CUSTOM, marker)`, otherwise `(default_option, b"")`. `DefaultMappingStorage` is gone — its role collapses into `MappingStorage(mapping, default_option=...)`. `SalesforcePubSubClient.connect` is an alias of `open()`, kept for the original 0.1.0 surface.
 - `client.py` — `SalesforcePubSubClient` owns the `grpc.aio` channel and the schema cache, plus the two subscription paths described below.
 - `pubsub_api_pb2.py` / `pubsub_api_pb2_grpc.py` — generated code, do not hand-edit except as noted below.
+
+### Subscription lifecycle
+
+`subscribe()` registers its gRPC call in `client._streams`, keyed by topic. `unsubscribe(topic_name)` cancels that call, which surfaces as `CANCELLED` and ends the generator normally for its consumer; `close()` cancels every active stream. Subscribing twice to the same topic raises `ClientInvalidOperation` — the registry is keyed by topic, and two streams on one topic would fight over the same replay marker. `client.subscriptions` exposes the active set.
+
+This is not the multiplexing `aiosfstream` had, and it can't be: CometD carried every channel over one connection, whereas the Pub/Sub API gives one bidirectional stream per `Subscribe` call. Each topic costs a stream.
 
 ### The two replay strategies
 
@@ -51,7 +58,9 @@ Both are supported, and they are deliberately separate entry points because mana
 
 `subscribe()` wraps `_subscribe_once()` in a loop: a gRPC `UNAUTHENTICATED` becomes the internal `_AuthenticationExpired`, the authenticator runs again, and the subscription is re-established from the stored replay marker with the fresh token in `FetchRequest.auth_refresh`. The retry count is bounded by `auth_retries` and reset whenever a resumed subscription delivers an event, so routine hourly expiries never exhaust it but revoked credentials fail fast instead of hammering the token endpoint.
 
-Events are only preserved across a token expiry if a *storing* `ReplayMarkerStorage` holds a marker. Two ways that silently fails: `ConstantReplayId` never stores, so it restarts from its option; and under `MANUAL` with nothing committed yet the marker is `None`, so the resumed stream restarts from `default_option` and drops everything between subscribe and expiry.
+`_ResumePosition` decides where the re-established stream starts, and exists because the replay storage is legitimately empty in two cases — `ConstantReplayId` never stores, and `MANUAL` stores nothing until the consumer commits. Recomputing `get_fetch_position()` there would restart from the default option and drop everything published in between. The resolution order is: the stored marker, then an in-memory position advanced under `AUTOMATIC` (which covers `ConstantReplayId`), then the position the subscription originally started from. A `NEW_EVENTS` subscription additionally *anchors* itself: the first keepalive received before any event names a concrete replay id, which replaces the `LATEST` preset so a resume is exact rather than "from now" again.
+
+One residual limitation, asserted in `test_manual_policy_without_a_marker_cannot_anchor_before_an_event`: under `MANUAL` + `NEW_EVENTS`, if the very first response already carries events and none is committed, no position precedes them, so the resume falls back to `LATEST`. Nothing in the protocol exposes a "position before this event".
 
 ### Regenerating the protobuf stubs
 
@@ -65,10 +74,12 @@ venv/bin/python -m grpc_tools.protoc -I<proto_dir> \
 
 `protoc` emits `import pubsub_api_pb2 as pubsub__api__pb2` at the top of `pubsub_api_pb2_grpc.py`, which breaks inside a package. The checked-in file has been patched to `from . import pubsub_api_pb2 as pubsub__api__pb2` — **re-apply that patch after every regeneration.**
 
+### replay_fallback is a heuristic
+
+`replay_fallback` mirrors `aiosfstream`: when the server rejects the replay id the subscription started from — typically because it aged out of the retention window — the marker is discarded and the subscription is retried once from the fallback option. Unlike the Streaming API there is no error code for this; the proto's `ErrorCode` covers only `{UNKNOWN, PUBLISH, COMMIT}`, both publish-side. So `is_replay_id_error()` matches on the gRPC status instead (`INVALID_ARGUMENT` whose details mention "replay") and is a `staticmethod` precisely so it can be overridden when Salesforce changes the wording. **If replay fallback stops triggering, look there first.**
+
 ## Remaining gaps
 
-- **No `unsubscribe` / multiplexing.** Each `subscribe()` call opens its own gRPC stream. `aiosfstream` multiplexed every channel over one connection and could drop individual subscriptions.
-- **`PublishStream` is unwired.** Only the unary `Publish` is used, so publishing pays a round trip per batch.
-- **No `replay_fallback`.** `aiosfstream` retried a subscription with a fallback option when a replay id fell outside the retention window. The proto's `ErrorCode` enum is only `{UNKNOWN, PUBLISH, COMMIT}`, so there is no error code to match on — recognising that case means inspecting the gRPC status details.
-- **Not adopted from the sibling project:** ruff, coverage, `py.typed`, uv, Sphinx docs. See "Conventions" above.
-- **Not a git repository.** There is no rollback point for changes made here.
+- **No Sphinx docs and no `uv_build` migration.** The sibling has both, plus `uv.lock` and GitHub Actions workflows.
+- **`ManagedSubscription` has no re-auth path.** `subscribe()` re-establishes itself on `UNAUTHENTICATED`; the managed path propagates it as a `ClientError`. The server holds the position, so a caller can simply re-iterate, but the asymmetry is real.
+- **`publish()` and `publish_stream()` don't inspect `PublishResult.error`.** A per-record failure is reported in the response, not raised.

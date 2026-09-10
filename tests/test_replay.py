@@ -22,6 +22,9 @@ class ReplayMarkerStorageStub(ReplayMarkerStorage):
     async def set_replay_marker(self, topic_name, replay_id):
         self.stored.append((topic_name, replay_id))
 
+    async def clear_replay_marker(self, topic_name):
+        self.marker = None
+
 
 def test_replay_option_values_are_replay_presets():
     assert ReplayOption.NEW_EVENTS == pb2.LATEST
@@ -89,3 +92,36 @@ def test_create_replay_storage_variants():
     assert from_mapping.mapping is mapping
 
     assert create_replay_storage(object()) is None
+
+
+@pytest.mark.asyncio
+async def test_mapping_storage_clears_a_marker():
+    mapping = {"/event/X__e": b"marker"}
+    storage = MappingStorage(mapping)
+
+    await storage.clear_replay_marker("/event/X__e")
+    await storage.clear_replay_marker("/event/absent")
+
+    assert mapping == {}
+
+
+@pytest.mark.asyncio
+async def test_clear_replay_marker_is_a_no_op_by_default():
+    storage = ConstantReplayId()
+
+    await storage.clear_replay_marker("/event/X__e")
+
+    assert await storage.get_replay_marker("/event/X__e") is None
+
+
+def test_mapping_storage_repr():
+    storage = MappingStorage({"/event/X__e": b"marker"})
+
+    assert repr(storage).startswith("MappingStorage(mapping=")
+    assert "ReplayOption.NEW_EVENTS" in repr(storage)
+
+
+def test_constant_replay_id_repr():
+    assert repr(ConstantReplayId(ReplayOption.ALL_EVENTS)) == (
+        "ConstantReplayId(default_option=<ReplayOption.ALL_EVENTS: 1>)"
+    )

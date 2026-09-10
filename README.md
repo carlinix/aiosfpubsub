@@ -15,6 +15,8 @@ older Salesforce Streaming API (CometD).
 - Automatic re-authentication, resuming from the stored replay position.
 - Two replay strategies: client-side replay marker storage, or Salesforce's
   own managed event subscriptions.
+- Replay fallback for replay ids that aged out of the retention window.
+- Streaming publish, and cancellable subscriptions.
 - Authenticators matching `aiosfstream` for easy migration, including the
   OAuth 2.0 Client Credentials flow.
 
@@ -105,10 +107,49 @@ async for event in subscription:
     await subscription.commit(event["replay_id"])  # only under MANUAL
 ```
 
+### Replay fallback
+
+A stored replay id eventually falls outside the event retention window, and
+the server then rejects the subscription. Give a `replay_fallback` to have the
+unusable position discarded and the subscription retried from a replay option
+instead of raising:
+
+```python
+client = SalesforcePubSubClient(
+    auth, replay=markers, replay_fallback=ReplayOption.ALL_EVENTS
+)
+```
+
+The Pub/Sub API has no error code for this condition, so it is recognised from
+the gRPC status. Override `SalesforcePubSubClient.is_replay_id_error()` if the
+server wording changes.
+
+### Stopping a subscription
+
+```python
+client.unsubscribe("/event/Your_Platform_Event__e")
+```
+
+The `async for` loop consuming that topic ends normally. Closing the client
+stops every active subscription. `client.subscriptions` lists them.
+
 ### Publishing
 
 ```python
 result = await client.publish("/event/Your_Platform_Event__e", [{"Field__c": "value"}])
+```
+
+To publish repeatedly over a single stream, pass an asynchronous iterable of
+record batches:
+
+```python
+async def batches():
+    while True:
+        yield [await next_record()]
+
+
+async for response in client.publish_stream(topic, batches()):
+    print(response.results)
 ```
 
 ## Migration from `aiosfstream`
@@ -120,7 +161,9 @@ result = await client.publish("/event/Your_Platform_Event__e", [{"Field__c": "va
   credentials directly.
 - **Subscription:** instead of `await client.subscribe(channel)` followed by
   iterating the client, iterate the `client.subscribe(topic_name)` generator.
-  There is no `unsubscribe`; stop iterating instead.
+  `unsubscribe(topic_name)` still exists and ends that iteration, but the
+  Pub/Sub API opens one stream per topic rather than multiplexing every
+  channel over a single connection.
 - **Replay:** `ReplayOption`, `MappingStorage`, `ConstantReplayId` and
   `ReplayMarkerStoragePolicy` keep their names. Replay ids are now opaque
   `bytes` rather than integers, and `ReplayMarker` is gone — nothing needs the
@@ -137,7 +180,9 @@ result = await client.publish("/event/Your_Platform_Event__e", [{"Field__c": "va
 ```bash
 python -m venv venv
 venv/bin/python -m pip install -e ".[dev]"
-venv/bin/python -m pytest
+venv/bin/python -m ruff check .
+venv/bin/python -m coverage run -m pytest
+venv/bin/python -m coverage report
 ```
 
 ## License

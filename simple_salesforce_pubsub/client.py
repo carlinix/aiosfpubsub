@@ -5,7 +5,7 @@ import io
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterable
 from enum import Enum, auto, unique
 from types import TracebackType
 from typing import Any
@@ -23,6 +23,7 @@ from .exceptions import (
     SchemaError,
 )
 from .replay import (
+    FetchPosition,
     ReplayMarkerStorage,
     ReplayOption,
     ReplayParameter,
@@ -60,6 +61,77 @@ class _AuthenticationExpired(Exception):
     subscription should be re-established with a fresh access token"""
 
 
+class _ReplayIdRejected(Exception):
+    """Internal signal that the server rejected the replay id the
+    subscription started from"""
+
+
+class _SubscriptionCancelled(Exception):
+    """Internal signal that the subscription was cancelled locally, by
+    :meth:`SalesforcePubSubClient.unsubscribe` or by closing the client"""
+
+
+class _ResumePosition:
+    """Tracks the position a subscription should be re-established from
+
+    The client's :obj:`~.ReplayMarkerStorage` is the source of truth, but it
+    is legitimately empty in two cases: :obj:`~.ConstantReplayId` never stores
+    anything, and under :obj:`ReplayMarkerStoragePolicy.MANUAL` nothing is
+    stored until the consumer commits. Recomputing the fetch position then
+    would restart the subscription from the default replay option, silently
+    dropping everything published since it began, so the position the stream
+    started from is captured once and reused.
+    """
+
+    def __init__(self, initial: FetchPosition) -> None:
+        #: The position the subscription originally started from
+        self.initial = initial
+        #: The last position known to be safe to resume from, for storages
+        #: which don't persist markers
+        self.resumable: bytes | None = None
+        #: Whether any event has been delivered to the consumer yet
+        self.delivered = False
+
+    def anchor(self, replay_id: bytes) -> None:
+        """Pin a "from now" subscription to the concrete *replay_id*
+
+        :obj:`~.ReplayOption.NEW_EVENTS` means "whatever is published from
+        now on", so re-establishing a subscription with it skips everything
+        published in between. A keepalive received before any event names the
+        position the stream actually started at, which can be resumed from
+        exactly.
+
+        :param replay_id: The ``latest_replay_id`` of a keepalive response
+        """
+        if not self.delivered and self.initial[0] == pb2.LATEST:
+            self.initial = (pb2.CUSTOM, replay_id)
+
+    def advance(self, replay_id: bytes) -> None:
+        """Record *replay_id* as consumed
+
+        Only called under :obj:`ReplayMarkerStoragePolicy.AUTOMATIC`; under
+        the manual policy an event is not consumed until it is committed.
+        """
+        self.resumable = replay_id
+
+    def restart(self, initial: FetchPosition) -> None:
+        """Discard what is known and start over from *initial*"""
+        self.initial = initial
+        self.resumable = None
+        self.delivered = False
+
+    def resolve(self, stored_marker: bytes | None) -> FetchPosition:
+        """Return the position to open the next stream with
+
+        :param stored_marker: The marker held by the replay storage, if any
+        """
+        if stored_marker:
+            return pb2.CUSTOM, stored_marker
+        if self.resumable:
+            return pb2.CUSTOM, self.resumable
+        return self.initial
+
+
 class SalesforcePubSubClient:
     """Salesforce Pub/Sub API client"""
 
@@ -72,6 +144,7 @@ class SalesforcePubSubClient:
         replay_storage_policy: ReplayMarkerStoragePolicy = (
             ReplayMarkerStoragePolicy.AUTOMATIC
         ),
+        replay_fallback: ReplayOption | None = None,
         num_requested: int = DEFAULT_NUM_REQUESTED,
         auth_retries: int = DEFAULT_AUTH_RETRIES,
     ) -> None:
@@ -88,6 +161,11 @@ class SalesforcePubSubClient:
         replay position instead.
         :param replay_storage_policy: Defines at which point the replay \
         marker of consumed events will be stored
+        :param replay_fallback: Replay option to fall back on when a \
+        subscription is rejected because the replay id it started from is \
+        no longer valid, typically because it fell outside the event \
+        retention window. Without it, such a rejection is raised as a \
+        :obj:`~.ClientError`.
         :param num_requested: The number of events to request from the \
         server at a time. The subscription iterators replenish this budget \
         as events are consumed, which is what applies backpressure.
@@ -117,6 +195,8 @@ class SalesforcePubSubClient:
         self.replay_storage: ReplayMarkerStorage = replay_storage
         #: Defines at which point replay markers of consumed events are stored
         self.replay_storage_policy = replay_storage_policy
+        #: Replay option to fall back on when a replay id gets rejected
+        self.replay_fallback = replay_fallback
         #: The number of events requested from the server at a time
         self.num_requested = num_requested
         #: Consecutive re-authentication attempts allowed before giving up
@@ -124,6 +204,7 @@ class SalesforcePubSubClient:
         self.channel: grpc.aio.Channel | None = None
         self.stub: pb2_grpc.PubSubStub | None = None
         self._schema_cache: dict[str, Any] = {}
+        self._streams: dict[str, Any] = {}
 
     async def open(self) -> None:
         """Authenticate and establish a connection with the Pub/Sub API
@@ -145,7 +226,13 @@ class SalesforcePubSubClient:
     connect = open
 
     async def close(self) -> None:
-        """Close the connection with the Pub/Sub API"""
+        """Close the connection with the Pub/Sub API
+
+        Every active :meth:`subscribe` stream is cancelled, so the consumers
+        iterating them stop.
+        """
+        for topic_name in list(self._streams):
+            self.unsubscribe(topic_name)
         if self.channel:
             await self.channel.close()
             self.channel = None
@@ -258,6 +345,7 @@ class SalesforcePubSubClient:
         topic_name: str,
         *,
         num_requested: int | None = None,
+        replay_fallback: ReplayOption | None = None,
     ) -> AsyncGenerator[Event, None]:
         """Subscribe to *topic_name* and yield decoded events
 
@@ -267,13 +355,20 @@ class SalesforcePubSubClient:
 
         If the server rejects the call metadata because the access token
         expired, the authenticator is invoked again and the subscription is
-        re-established from the stored replay marker, so events are not lost
-        as long as a storing :obj:`~.ReplayMarkerStorage` is in use.
+        re-established. It resumes from the stored replay marker, or, when the
+        storage holds none, from the position the subscription originally
+        started at, so events are not dropped by a policy or a storage which
+        has nothing recorded yet.
+
+        Iteration ends when :meth:`unsubscribe` is called for *topic_name*, or
+        when the client is closed.
 
         :param topic_name: Name of the topic, such as \
         ``/event/My_Event__e`` or ``/data/AccountChangeEvent``
         :param num_requested: Overrides the client's ``num_requested``
-        :raise ClientInvalidOperation: If the client is not open
+        :param replay_fallback: Overrides the client's ``replay_fallback``
+        :raise ClientInvalidOperation: If the client is not open, or if \
+        *topic_name* is already subscribed to
         :raise AuthenticationError: If re-authentication fails, or if the \
         server keeps rejecting the call metadata after ``auth_retries`` \
         consecutive attempts
@@ -281,48 +376,83 @@ class SalesforcePubSubClient:
         :raise SchemaError: If an event's schema can't be fetched or parsed
         """
         self._get_stub()
+        if topic_name in self._streams:
+            raise ClientInvalidOperation(
+                f"Already subscribed to {topic_name!r}. Call unsubscribe() first."
+            )
         budget = num_requested if num_requested is not None else self.num_requested
+        fallback = (
+            replay_fallback if replay_fallback is not None else self.replay_fallback
+        )
+        state = _ResumePosition(
+            await self.replay_storage.get_fetch_position(topic_name)
+        )
         auth_refresh = ""
         attempts = 0
-        while True:
-            delivered = False
-            try:
-                async for event in self._subscribe_once(
-                    topic_name, budget, auth_refresh
-                ):
-                    delivered = True
-                    yield event
-                return
-            except _AuthenticationExpired as error:
-                # a subscription that delivered events was healthy, so the
-                # expiry is routine rather than a credential problem
-                attempts = 0 if delivered else attempts + 1
-                if attempts > self.auth_retries:
-                    raise AuthenticationError(
-                        f"The access token was rejected after {self.auth_retries} "
-                        f"consecutive re-authentication attempts."
-                    ) from error
-                LOGGER.info(
-                    "Access token rejected, re-authenticating and resuming %r.",
-                    topic_name,
-                )
-                await self.authenticator.authenticate()
-                auth_refresh = self.authenticator.access_token or ""
+        fallback_used = False
+        try:
+            while True:
+                delivered = False
+                try:
+                    async for event in self._subscribe_once(
+                        topic_name, budget, auth_refresh, state
+                    ):
+                        delivered = True
+                        yield event
+                    return
+                except _SubscriptionCancelled:
+                    return
+                except _AuthenticationExpired as error:
+                    # a subscription that delivered events was healthy, so the
+                    # expiry is routine rather than a credential problem
+                    attempts = 0 if delivered else attempts + 1
+                    if attempts > self.auth_retries:
+                        raise AuthenticationError(
+                            f"The access token was rejected after "
+                            f"{self.auth_retries} consecutive re-authentication "
+                            f"attempts."
+                        ) from error
+                    LOGGER.info(
+                        "Access token rejected, re-authenticating and resuming %r.",
+                        topic_name,
+                    )
+                    await self.authenticator.authenticate()
+                    auth_refresh = self.authenticator.access_token or ""
+                except _ReplayIdRejected as error:
+                    if fallback is None or fallback_used:
+                        raise ClientError(
+                            f"Subscribe failed: {error}"
+                        ) from error.__cause__
+                    LOGGER.warning(
+                        "Subscription to %r failed with message: %s, "
+                        "retrying subscription with %r.",
+                        topic_name,
+                        error,
+                        fallback,
+                    )
+                    fallback_used = True
+                    await self.replay_storage.clear_replay_marker(topic_name)
+                    state.restart((fallback.value, b""))
+        finally:
+            self._streams.pop(topic_name, None)
 
     async def _subscribe_once(
         self,
         topic_name: str,
         num_requested: int,
         auth_refresh: str,
+        state: _ResumePosition,
     ) -> AsyncGenerator[Event, None]:
         """Run a single ``Subscribe`` stream until it ends or fails
 
         :raise _AuthenticationExpired: If the server rejects the call metadata
+        :raise _ReplayIdRejected: If the server rejects the replay id
+        :raise _SubscriptionCancelled: If the subscription was cancelled \
+        locally
         """
         stub = self._get_stub()
-        replay_preset, replay_id = await self.replay_storage.get_fetch_position(
-            topic_name
-        )
+        stored_marker = await self.replay_storage.get_replay_marker(topic_name)
+        replay_preset, replay_id = state.resolve(stored_marker)
         requests: asyncio.Queue[pb2.FetchRequest] = asyncio.Queue()
 
         async def request_generator() -> AsyncIterator[pb2.FetchRequest]:
@@ -336,24 +466,32 @@ class SalesforcePubSubClient:
             while True:
                 yield await requests.get()
 
-        responses = stub.Subscribe(request_generator(), metadata=self._get_metadata())
+        call = stub.Subscribe(request_generator(), metadata=self._get_metadata())
+        self._streams[topic_name] = call
         automatic = self.replay_storage_policy is ReplayMarkerStoragePolicy.AUTOMATIC
         try:
-            async for response in responses:
+            async for response in call:
                 for consumer_event in response.events:
+                    state.delivered = True
                     yield await self._decode_event(consumer_event)
                     if automatic:
+                        state.advance(consumer_event.replay_id)
                         await self.replay_storage.set_replay_marker(
                             topic_name, consumer_event.replay_id
                         )
                 # A keepalive carries no events but a fresh latest_replay_id.
                 # Advancing on it keeps an idle subscription from re-reading
                 # the retention window on reconnect, but there is nothing to
-                # consume, so a MANUAL policy must not advance here.
-                if not response.events and response.latest_replay_id and automatic:
-                    await self.replay_storage.set_replay_marker(
-                        topic_name, response.latest_replay_id
-                    )
+                # consume, so a MANUAL policy must not advance here. It can
+                # still anchor a "from now" subscription, which loses no
+                # uncommitted event because none has been delivered yet.
+                if not response.events and response.latest_replay_id:
+                    state.anchor(response.latest_replay_id)
+                    if automatic:
+                        state.advance(response.latest_replay_id)
+                        await self.replay_storage.set_replay_marker(
+                            topic_name, response.latest_replay_id
+                        )
                 if response.pending_num_requested <= 0:
                     await requests.put(
                         pb2.FetchRequest(
@@ -361,9 +499,51 @@ class SalesforcePubSubClient:
                         )
                     )
         except grpc.aio.AioRpcError as error:
-            if error.code() is grpc.StatusCode.UNAUTHENTICATED:
+            code = error.code()
+            if code is grpc.StatusCode.UNAUTHENTICATED:
                 raise _AuthenticationExpired from error
+            if code is grpc.StatusCode.CANCELLED:
+                raise _SubscriptionCancelled from error
+            if self.is_replay_id_error(error):
+                raise _ReplayIdRejected(error.details() or "") from error
             raise ClientError(f"Subscribe failed: {error.details()}") from error
+
+    @staticmethod
+    def is_replay_id_error(error: grpc.aio.AioRpcError) -> bool:
+        """Return whether *error* means the replay id was rejected
+
+        The usual cause is a replay id that has fallen outside the event
+        retention window. Unlike the Streaming API, the Pub/Sub API has no
+        error code for this: the ``ErrorCode`` enum of the protocol only
+        covers publish and commit failures, so the condition has to be
+        recognised from the gRPC status. Override this in a subclass if the
+        server wording changes.
+
+        :param error: The error raised by the ``Subscribe`` stream
+        """
+        if error.code() is not grpc.StatusCode.INVALID_ARGUMENT:
+            return False
+        return "replay" in (error.details() or "").lower()
+
+    def unsubscribe(self, topic_name: str) -> bool:
+        """Stop the subscription to *topic_name*
+
+        The generator returned by :meth:`subscribe` stops iterating, so its
+        consumer's ``async for`` loop ends normally.
+
+        :param topic_name: Name of the subscribed topic
+        :return: Whether there was a subscription to stop
+        """
+        call = self._streams.pop(topic_name, None)
+        if call is None:
+            return False
+        call.cancel()
+        return True
+
+    @property
+    def subscriptions(self) -> frozenset[str]:
+        """Names of the topics with an active :meth:`subscribe` stream"""
+        return frozenset(self._streams)
 
     def managed_subscribe(
         self,
@@ -430,6 +610,50 @@ class SalesforcePubSubClient:
             return await stub.Publish(request, metadata=self._get_metadata())
         except grpc.aio.AioRpcError as error:
             raise ClientError(f"Publish failed: {error.details()}") from error
+
+
+    async def publish_stream(
+        self,
+        topic_name: str,
+        batches: AsyncIterable[Iterable[dict[str, Any]]],
+    ) -> AsyncGenerator[pb2.PublishResponse, None]:
+        """Publish successive *batches* of records over a single stream
+
+        Unlike :meth:`publish`, which pays a round trip per call, this keeps
+        one ``PublishStream`` open and yields the server's response for each
+        batch as it arrives. The topic's schema is fetched once.
+
+        :param topic_name: Name of the topic to publish to
+        :param batches: An asynchronous iterable of record batches
+        :raise ClientInvalidOperation: If the client is not open
+        :raise ClientError: If the stream gets rejected by the server
+        :raise SchemaError: If the topic's schema can't be fetched or parsed
+        """
+        stub = self._get_stub()
+        topic_info = await self.get_topic_info(topic_name)
+        schema_id = topic_info.schema_id
+        schema = await self.get_schema(schema_id)
+
+        async def request_generator() -> AsyncIterator[pb2.PublishRequest]:
+            async for records in batches:
+                yield pb2.PublishRequest(
+                    topic_name=topic_name,
+                    events=[
+                        pb2.ProducerEvent(
+                            schema_id=schema_id,
+                            payload=self._encode_payload(schema, record),
+                        )
+                        for record in records
+                    ],
+                )
+
+        try:
+            async for response in stub.PublishStream(
+                request_generator(), metadata=self._get_metadata()
+            ):
+                yield response
+        except grpc.aio.AioRpcError as error:
+            raise ClientError(f"Publish stream failed: {error.details()}") from error
 
 
 class ManagedSubscription:

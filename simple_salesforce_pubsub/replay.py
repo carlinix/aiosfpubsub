@@ -64,6 +64,18 @@ class ReplayMarkerStorage(ABC):
         :param replay_id: An opaque replay id
         """
 
+    @abstractmethod
+    async def clear_replay_marker(self, topic_name: str) -> None:
+        """Discard the stored replay marker for the given *topic_name*
+
+        Called when the server rejects a stored replay id, so that the
+        subscription can fall back to a replay option instead of retrying the
+        same unusable position. Implementations which store nothing have
+        nothing to do here.
+
+        :param topic_name: Name of the subscribed topic
+        """
+
     async def get_fetch_position(self, topic_name: str) -> FetchPosition:
         """Return the replay preset and replay id to start a subscription with
 
@@ -116,6 +128,9 @@ class MappingStorage(ReplayMarkerStorage):
         except KeyError:
             return None
 
+    async def clear_replay_marker(self, topic_name: str) -> None:
+        self.mapping.pop(topic_name, None)
+
 
 class ConstantReplayId(ReplayMarkerStorage):
     """A replay marker storage which starts every subscription from the same
@@ -137,6 +152,9 @@ class ConstantReplayId(ReplayMarkerStorage):
 
     async def get_replay_marker(self, topic_name: str) -> bytes | None:
         return None
+
+    async def clear_replay_marker(self, topic_name: str) -> None:
+        pass
 
 
 #: The types accepted by the ``replay`` parameter of

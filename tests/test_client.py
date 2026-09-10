@@ -1,6 +1,9 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import io
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import fastavro
 import grpc
 import pytest
 
@@ -14,6 +17,7 @@ from simple_salesforce_pubsub.exceptions import (
     AuthenticationError,
     ClientError,
     ClientInvalidOperation,
+    SchemaError,
 )
 from simple_salesforce_pubsub.replay import MappingStorage, ReplayOption
 
@@ -60,8 +64,8 @@ def fetch_response(events=(), *, pending=5, latest_replay_id=b""):
     )
 
 
-class ResponseStreamStub:
-    """Stands in for the stream returned by a streaming stub method
+class CallStub:
+    """Stands in for the call object returned by a streaming stub method
 
     A background task drains the client's request stream into
     :obj:`requests`, so that flow control replenishment and commits can be
@@ -72,23 +76,31 @@ class ResponseStreamStub:
         self.responses = list(responses)
         self.error = error
         self.requests = []
+        self.cancelled = False
 
     def __call__(self, request_iterator, metadata=None):
         self.request_iterator = request_iterator
         self.metadata = metadata
-        return self._iterate()
+        return self
+
+    def cancel(self):
+        self.cancelled = True
 
     async def _pump(self):
         async for request in self.request_iterator:
             self.requests.append(request)
 
-    async def _iterate(self):
+    async def __aiter__(self):
         pump = asyncio.create_task(self._pump())
         try:
             await self._settle()
             for response in self.responses:
+                if self.cancelled:
+                    break
                 yield response
                 await self._settle()
+            if self.cancelled:
+                raise RpcErrorStub(grpc.StatusCode.CANCELLED, "cancelled")
             if self.error is not None:
                 raise self.error
         finally:
@@ -103,6 +115,12 @@ class ResponseStreamStub:
         """
         for _ in range(3):
             await asyncio.sleep(0)
+
+
+def call_sequence(*calls):
+    """Return a stub method handing out *calls* one per invocation"""
+    remaining = iter(calls)
+    return lambda *args, **kwargs: next(remaining)(*args, **kwargs)
 
 
 @pytest.fixture
@@ -148,7 +166,7 @@ async def test_operations_require_an_open_client():
 
 @pytest.mark.asyncio
 async def test_subscribe_yields_decoded_events(client):
-    stream = ResponseStreamStub([fetch_response([consumer_event(b"\x01")])])
+    stream = CallStub([fetch_response([consumer_event(b"\x01")])])
     client.stub.Subscribe = stream
 
     events = [event async for event in client.subscribe("/event/X__e")]
@@ -168,7 +186,7 @@ async def test_subscribe_yields_decoded_events(client):
 @pytest.mark.asyncio
 async def test_subscribe_sends_stored_replay_position(client):
     await client.replay_storage.set_replay_marker("/event/X__e", b"\x09")
-    stream = ResponseStreamStub([])
+    stream = CallStub([])
     client.stub.Subscribe = stream
 
     assert [event async for event in client.subscribe("/event/X__e")] == []
@@ -180,7 +198,7 @@ async def test_subscribe_sends_stored_replay_position(client):
 
 @pytest.mark.asyncio
 async def test_subscribe_replenishes_when_budget_is_exhausted(client):
-    stream = ResponseStreamStub(
+    stream = CallStub(
         [
             fetch_response([consumer_event(b"\x01")], pending=1),
             fetch_response([consumer_event(b"\x02")], pending=0),
@@ -199,7 +217,7 @@ async def test_subscribe_replenishes_when_budget_is_exhausted(client):
 
 @pytest.mark.asyncio
 async def test_automatic_policy_stores_marker_of_consumed_events(client):
-    client.stub.Subscribe = ResponseStreamStub(
+    client.stub.Subscribe = CallStub(
         [fetch_response([consumer_event(b"\x01"), consumer_event(b"\x02")])]
     )
 
@@ -211,7 +229,7 @@ async def test_automatic_policy_stores_marker_of_consumed_events(client):
 
 @pytest.mark.asyncio
 async def test_automatic_policy_advances_on_keepalive(client):
-    client.stub.Subscribe = ResponseStreamStub(
+    client.stub.Subscribe = CallStub(
         [fetch_response(latest_replay_id=b"\x07")]
     )
 
@@ -224,7 +242,7 @@ async def test_automatic_policy_advances_on_keepalive(client):
 @pytest.mark.asyncio
 async def test_manual_policy_stores_nothing_until_committed(client):
     client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
-    client.stub.Subscribe = ResponseStreamStub(
+    client.stub.Subscribe = CallStub(
         [fetch_response([consumer_event(b"\x01")], latest_replay_id=b"\x07")]
     )
 
@@ -238,7 +256,7 @@ async def test_manual_policy_stores_nothing_until_committed(client):
 @pytest.mark.asyncio
 async def test_manual_policy_ignores_keepalive(client):
     client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
-    client.stub.Subscribe = ResponseStreamStub(
+    client.stub.Subscribe = CallStub(
         [fetch_response(latest_replay_id=b"\x07")]
     )
 
@@ -250,13 +268,12 @@ async def test_manual_policy_ignores_keepalive(client):
 
 @pytest.mark.asyncio
 async def test_subscribe_reauthenticates_and_resumes(client):
-    expired = ResponseStreamStub(
+    expired = CallStub(
         [fetch_response([consumer_event(b"\x01")])],
         error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
     )
-    resumed = ResponseStreamStub([fetch_response([consumer_event(b"\x02")])])
-    streams = iter([expired, resumed])
-    client.stub.Subscribe = lambda *args, **kwargs: next(streams)(*args, **kwargs)
+    resumed = CallStub([fetch_response([consumer_event(b"\x02")])])
+    client.stub.Subscribe = call_sequence(expired, resumed)
 
     events = [event async for event in client.subscribe("/event/X__e")]
 
@@ -270,7 +287,7 @@ async def test_subscribe_reauthenticates_and_resumes(client):
 
 @pytest.mark.asyncio
 async def test_subscribe_wraps_other_rpc_errors(client):
-    client.stub.Subscribe = ResponseStreamStub(
+    client.stub.Subscribe = CallStub(
         [], error=RpcErrorStub(grpc.StatusCode.PERMISSION_DENIED, "denied")
     )
 
@@ -287,7 +304,7 @@ async def test_managed_subscribe_requires_an_identifier(client):
 
 @pytest.mark.asyncio
 async def test_managed_subscribe_commits_automatically(client):
-    stream = ResponseStreamStub(
+    stream = CallStub(
         [
             pb2.ManagedFetchResponse(
                 events=[consumer_event(b"\x01")], pending_num_requested=5
@@ -309,7 +326,7 @@ async def test_managed_subscribe_commits_automatically(client):
 @pytest.mark.asyncio
 async def test_managed_subscribe_manual_policy_does_not_commit(client):
     client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
-    stream = ResponseStreamStub(
+    stream = CallStub(
         [
             pb2.ManagedFetchResponse(
                 events=[consumer_event(b"\x01")], pending_num_requested=0
@@ -328,7 +345,7 @@ async def test_managed_subscribe_manual_policy_does_not_commit(client):
 
 @pytest.mark.asyncio
 async def test_managed_subscribe_records_commit_responses(client):
-    stream = ResponseStreamStub(
+    stream = CallStub(
         [
             pb2.ManagedFetchResponse(
                 commit_response=pb2.CommitReplayResponse(
@@ -383,12 +400,9 @@ async def test_publish_wraps_rpc_errors(client):
 async def test_subscribe_gives_up_after_repeated_auth_failures(client):
     client.auth_retries = 2
 
-    def always_unauthenticated(*args, **kwargs):
-        return ResponseStreamStub(
-            [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
-        )(*args, **kwargs)
-
-    client.stub.Subscribe = always_unauthenticated
+    client.stub.Subscribe = lambda *args, **kwargs: CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
+    )(*args, **kwargs)
 
     with pytest.raises(AuthenticationError, match="2 consecutive"):
         async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
@@ -399,26 +413,467 @@ async def test_subscribe_gives_up_after_repeated_auth_failures(client):
 
 @pytest.mark.asyncio
 async def test_subscribe_resets_the_retry_count_after_delivering_events(client):
-    streams = iter(
-        [
-            ResponseStreamStub(
-                [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
-            ),
-            ResponseStreamStub(
-                [fetch_response([consumer_event(b"\x01")])],
-                error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
-            ),
-            ResponseStreamStub(
-                [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
-            ),
-            ResponseStreamStub([fetch_response([consumer_event(b"\x02")])]),
-        ]
-    )
     client.auth_retries = 1
-    client.stub.Subscribe = lambda *args, **kwargs: next(streams)(*args, **kwargs)
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub(
+            [fetch_response([consumer_event(b"\x01")])],
+            error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+        ),
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([fetch_response([consumer_event(b"\x02")])]),
+    )
 
     events = [event async for event in client.subscribe("/event/X__e")]
 
     # without the reset, the third failure would exhaust the single retry
     assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
     assert client.authenticator.authenticate_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_manual_policy_redelivers_uncommitted_events(client):
+    """Uncommitted events must come back after a re-authentication
+
+    The consumer received an event but never committed it, so the stored
+    marker still points before it and the resumed stream redelivers it.
+    """
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    await client.replay_storage.set_replay_marker("/event/X__e", b"\x05")
+    expired = CallStub(
+        [fetch_response([consumer_event(b"\x06")])],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([fetch_response([consumer_event(b"\x06")])])
+    client.stub.Subscribe = call_sequence(expired, resumed)
+
+    events = [event async for event in client.subscribe("/event/X__e")]
+
+    assert [event["replay_id"] for event in events] == [b"\x06", b"\x06"]
+    assert resumed.requests[0].replay_preset == pb2.CUSTOM
+    assert resumed.requests[0].replay_id == b"\x05"
+
+
+@pytest.mark.asyncio
+async def test_manual_policy_without_a_marker_cannot_anchor_before_an_event(client):
+    """A known limitation, asserted so a change to it is deliberate
+
+    Under NEW_EVENTS the subscription only learns a concrete replay id from
+    the events themselves. If the very first response already carries events
+    and none of them is committed, there is no position that precedes them,
+    so the resumed stream starts from NEW_EVENTS again.
+    """
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    expired = CallStub(
+        [fetch_response([consumer_event(b"\x01")])],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([])
+    client.stub.Subscribe = call_sequence(expired, resumed)
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert resumed.requests[0].replay_preset == pb2.LATEST
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_the_keepalive_anchor_for_new_events(client):
+    """A NEW_EVENTS subscription anchors itself to a concrete replay id
+
+    Re-establishing it with NEW_EVENTS would mean "from now" all over again,
+    skipping whatever was published while the token was being refreshed.
+    """
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    expired = CallStub(
+        [fetch_response(latest_replay_id=b"\x0a")],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([])
+    client.stub.Subscribe = call_sequence(expired, resumed)
+
+    async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+        pass
+
+    assert expired.requests[0].replay_preset == pb2.LATEST
+    assert resumed.requests[0].replay_preset == pb2.CUSTOM
+    assert resumed.requests[0].replay_id == b"\x0a"
+
+
+@pytest.mark.asyncio
+async def test_keepalive_does_not_anchor_after_an_event_was_delivered(client):
+    """Anchoring past a delivered but uncommitted event would lose it"""
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    expired = CallStub(
+        [
+            fetch_response([consumer_event(b"\x01")]),
+            fetch_response(latest_replay_id=b"\x0a"),
+        ],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([])
+    client.stub.Subscribe = call_sequence(expired, resumed)
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert resumed.requests[0].replay_preset == pb2.LATEST
+
+
+@pytest.mark.asyncio
+async def test_resume_without_a_storing_storage(client):
+    """ConstantReplayId stores nothing, so the resume position is in memory"""
+    client = SalesforcePubSubClient(
+        AuthenticatorStub(), replay=ReplayOption.ALL_EVENTS
+    )
+    client.stub = MagicMock()
+    client._schema_cache["schema-1"] = {"type": "record", "name": "E", "fields": []}
+    expired = CallStub(
+        [fetch_response([consumer_event(b"\x03")])],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([])
+    client.stub.Subscribe = call_sequence(expired, resumed)
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    # without the in-memory position this would re-read the whole window
+    assert expired.requests[0].replay_preset == pb2.EARLIEST
+    assert resumed.requests[0].replay_preset == pb2.CUSTOM
+    assert resumed.requests[0].replay_id == b"\x03"
+
+
+def test_is_replay_id_error_recognises_the_status():
+    assert SalesforcePubSubClient.is_replay_id_error(
+        RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is invalid")
+    )
+    assert not SalesforcePubSubClient.is_replay_id_error(
+        RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Topic does not exist")
+    )
+    assert not SalesforcePubSubClient.is_replay_id_error(
+        RpcErrorStub(grpc.StatusCode.PERMISSION_DENIED, "replay")
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_fallback_retries_and_clears_the_marker(client):
+    client.replay_fallback = ReplayOption.ALL_EVENTS
+    await client.replay_storage.set_replay_marker("/event/X__e", b"\x99")
+    rejected = CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is stale")
+    )
+    retried = CallStub([fetch_response([consumer_event(b"\x01")])])
+    client.stub.Subscribe = call_sequence(rejected, retried)
+
+    events = [event async for event in client.subscribe("/event/X__e")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01"]
+    assert rejected.requests[0].replay_id == b"\x99"
+    assert retried.requests[0].replay_preset == pb2.EARLIEST
+    assert retried.requests[0].replay_id == b""
+
+
+@pytest.mark.asyncio
+async def test_replay_fallback_can_be_given_per_subscription(client):
+    rejected = CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is stale")
+    )
+    retried = CallStub([])
+    client.stub.Subscribe = call_sequence(rejected, retried)
+
+    async for _ in client.subscribe(  # pragma: no cover
+        "/event/X__e", replay_fallback=ReplayOption.ALL_EVENTS
+    ):
+        pass
+
+    assert retried.requests[0].replay_preset == pb2.EARLIEST
+
+
+@pytest.mark.asyncio
+async def test_replay_id_error_without_a_fallback_is_raised(client):
+    client.stub.Subscribe = lambda *args, **kwargs: CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is stale")
+    )(*args, **kwargs)
+
+    with pytest.raises(ClientError, match="Replay ID is stale"):
+        async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+            pass
+
+
+@pytest.mark.asyncio
+async def test_replay_fallback_is_not_retried_twice(client):
+    client.replay_fallback = ReplayOption.ALL_EVENTS
+    error = RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is stale")
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=error), CallStub([], error=error)
+    )
+
+    with pytest.raises(ClientError, match="Replay ID is stale"):
+        async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+            pass
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_ends_the_iteration(client):
+    call = CallStub(
+        [
+            fetch_response([consumer_event(b"\x01")]),
+            fetch_response([consumer_event(b"\x02")]),
+        ]
+    )
+    client.stub.Subscribe = call
+
+    events = []
+    async for event in client.subscribe("/event/X__e"):
+        events.append(event)
+        client.unsubscribe("/event/X__e")
+
+    assert [event["replay_id"] for event in events] == [b"\x01"]
+    assert call.cancelled
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_reports_whether_there_was_a_subscription(client):
+    assert client.unsubscribe("/event/X__e") is False
+
+
+@pytest.mark.asyncio
+async def test_subscriptions_are_tracked_and_released(client):
+    client.stub.Subscribe = CallStub([fetch_response([consumer_event(b"\x01")])])
+
+    events = client.subscribe("/event/X__e")
+    await anext(events)
+    assert client.subscriptions == frozenset({"/event/X__e"})
+
+    await events.aclose()
+    assert client.subscriptions == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_subscribing_twice_to_the_same_topic_is_rejected(client):
+    client.stub.Subscribe = CallStub([fetch_response([consumer_event(b"\x01")])])
+
+    events = client.subscribe("/event/X__e")
+    await anext(events)
+
+    with pytest.raises(ClientInvalidOperation, match="Already subscribed"):
+        await anext(client.subscribe("/event/X__e"))
+
+    await events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_active_subscriptions(client):
+    call = CallStub(
+        [
+            fetch_response([consumer_event(b"\x01")]),
+            fetch_response([consumer_event(b"\x02")]),
+        ]
+    )
+    client.stub.Subscribe = call
+    client.channel = MagicMock(close=AsyncMock())
+
+    events = client.subscribe("/event/X__e")
+    await anext(events)
+    await client.close()
+
+    assert call.cancelled
+    assert client.subscriptions == frozenset()
+    assert [event async for event in events] == []
+
+
+@pytest.mark.asyncio
+async def test_publish_stream_encodes_every_batch(client):
+    client.stub.GetTopic = AsyncMock(
+        return_value=pb2.TopicInfo(topic_name="/event/X__e", schema_id="schema-1")
+    )
+    call = CallStub(
+        [
+            pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x01")]),
+            pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x02")]),
+        ]
+    )
+    client.stub.PublishStream = call
+
+    async def batches():
+        yield [{}]
+        yield [{}, {}]
+
+    responses = [
+        response async for response in client.publish_stream("/event/X__e", batches())
+    ]
+
+    assert [response.results[0].replay_id for response in responses] == [
+        b"\x01",
+        b"\x02",
+    ]
+    assert [len(request.events) for request in call.requests] == [1, 2]
+    assert call.requests[0].topic_name == "/event/X__e"
+    assert call.requests[0].events[0].schema_id == "schema-1"
+
+
+@pytest.mark.asyncio
+async def test_publish_stream_wraps_rpc_errors(client):
+    client.stub.GetTopic = AsyncMock(
+        return_value=pb2.TopicInfo(topic_name="/event/X__e", schema_id="schema-1")
+    )
+    client.stub.PublishStream = CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.PERMISSION_DENIED, "denied")
+    )
+
+    async def batches():
+        yield [{}]
+
+    with pytest.raises(ClientError, match="denied"):
+        async for _ in client.publish_stream("/event/X__e", batches()):
+            pass  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_open_authenticates_and_builds_the_stub():
+    client = SalesforcePubSubClient(AuthenticatorStub(), endpoint="pubsub.test:443")
+    channel = MagicMock()
+    with (
+        patch("simple_salesforce_pubsub.client.grpc.ssl_channel_credentials"),
+        patch(
+            "simple_salesforce_pubsub.client.grpc.aio.secure_channel",
+            return_value=channel,
+        ) as secure_channel,
+    ):
+        await client.open()
+
+    assert client.authenticator.authenticate_calls == 1
+    assert client.channel is channel
+    assert client.stub is not None
+    assert secure_channel.call_args.args[0] == "pubsub.test:443"
+
+
+@pytest.mark.asyncio
+async def test_connect_is_an_alias_of_open():
+    assert SalesforcePubSubClient.connect is SalesforcePubSubClient.open
+
+
+@pytest.mark.asyncio
+async def test_context_manager_opens_and_closes():
+    client = SalesforcePubSubClient(AuthenticatorStub())
+    channel = MagicMock(close=AsyncMock())
+    with (
+        patch("simple_salesforce_pubsub.client.grpc.ssl_channel_credentials"),
+        patch(
+            "simple_salesforce_pubsub.client.grpc.aio.secure_channel",
+            return_value=channel,
+        ),
+    ):
+        async with client as entered:
+            assert entered is client
+            assert client.stub is not None
+
+    channel.close.assert_awaited_once()
+    assert client.channel is None
+    assert client.stub is None
+
+
+@pytest.mark.asyncio
+async def test_close_without_a_channel_is_harmless(client):
+    client.channel = None
+
+    await client.close()
+
+    assert client.stub is not None
+
+
+@pytest.mark.asyncio
+async def test_get_topic_info_wraps_rpc_errors(client):
+    client.stub.GetTopic = AsyncMock(
+        side_effect=RpcErrorStub(grpc.StatusCode.NOT_FOUND, "no topic")
+    )
+
+    with pytest.raises(ClientError, match="no topic"):
+        await client.get_topic_info("/event/X__e")
+
+
+@pytest.mark.asyncio
+async def test_get_schema_parses_and_caches(client):
+    schema_json = json.dumps(
+        {"type": "record", "name": "E", "fields": [{"name": "a", "type": "string"}]}
+    )
+    client.stub.GetSchema = AsyncMock(
+        return_value=pb2.SchemaInfo(schema_id="schema-2", schema_json=schema_json)
+    )
+
+    first = await client.get_schema("schema-2")
+    second = await client.get_schema("schema-2")
+
+    assert first is second
+    assert client.stub.GetSchema.await_count == 1
+    assert first["name"] == "E"
+
+
+@pytest.mark.asyncio
+async def test_get_schema_wraps_fetch_errors(client):
+    client.stub.GetSchema = AsyncMock(
+        side_effect=RpcErrorStub(grpc.StatusCode.NOT_FOUND, "no schema")
+    )
+
+    with pytest.raises(SchemaError, match="Failed to fetch schema"):
+        await client.get_schema("schema-2")
+
+
+@pytest.mark.asyncio
+async def test_get_schema_wraps_parse_errors(client):
+    client.stub.GetSchema = AsyncMock(
+        return_value=pb2.SchemaInfo(schema_id="schema-2", schema_json="not json")
+    )
+
+    with pytest.raises(SchemaError, match="Failed to parse schema"):
+        await client.get_schema("schema-2")
+
+
+@pytest.mark.asyncio
+async def test_events_are_decoded_with_their_schema_and_headers(client):
+    schema = {
+        "type": "record",
+        "name": "E",
+        "fields": [{"name": "Field__c", "type": "string"}],
+    }
+    client._schema_cache["schema-2"] = fastavro.parse_schema(schema)
+    payload = io.BytesIO()
+    fastavro.schemaless_writer(
+        payload, client._schema_cache["schema-2"], {"Field__c": "value"}
+    )
+    event = pb2.ConsumerEvent(
+        event=pb2.ProducerEvent(
+            id="evt",
+            schema_id="schema-2",
+            payload=payload.getvalue(),
+            headers=[pb2.EventHeader(key="trace", value=b"abc")],
+        ),
+        replay_id=b"\x01",
+    )
+    client.stub.Subscribe = CallStub([fetch_response([event])])
+
+    decoded = await anext(client.subscribe("/event/X__e"))
+
+    assert decoded["payload"] == {"Field__c": "value"}
+    assert decoded["headers"] == {"trace": b"abc"}
+    assert decoded["id"] == "evt"
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_wraps_rpc_errors(client):
+    client.stub.ManagedSubscribe = CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.PERMISSION_DENIED, "denied")
+    )
+
+    with pytest.raises(ClientError, match="Managed subscribe failed"):
+        async for _ in client.managed_subscribe(developer_name="sub"):
+            pass  # pragma: no cover
+
+
+def test_managed_subscription_repr(client):
+    subscription = client.managed_subscribe(developer_name="sub")
+
+    assert repr(subscription) == (
+        "ManagedSubscription(subscription_id='', developer_name='sub')"
+    )

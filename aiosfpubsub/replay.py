@@ -17,7 +17,7 @@ from enum import IntEnum, unique
 from . import pubsub_api_pb2 as pb2
 
 #: A ``(replay_preset, replay_id)`` pair, as accepted by
-#: :obj:`~simple_salesforce_pubsub.pubsub_api_pb2.FetchRequest`
+#: :obj:`~aiosfpubsub.pubsub_api_pb2.FetchRequest`
 FetchPosition = tuple[int, bytes]
 
 
@@ -158,7 +158,7 @@ class ConstantReplayId(ReplayMarkerStorage):
 
 
 #: The types accepted by the ``replay`` parameter of
-#: :obj:`~simple_salesforce_pubsub.client.SalesforcePubSubClient`
+#: :obj:`~aiosfpubsub.client.SalesforcePubSubClient`
 ReplayParameter = ReplayOption | ReplayMarkerStorage | MutableMapping[str, bytes]
 
 

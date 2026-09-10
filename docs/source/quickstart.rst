@@ -5,14 +5,14 @@ Subscribing
 -----------
 
 Create an authenticator, hand it to a
-:obj:`~simple_salesforce_pubsub.SalesforcePubSubClient`, and iterate a
+:obj:`~aiosfpubsub.SalesforcePubSubClient`, and iterate a
 subscription:
 
 .. code-block:: python
 
     import asyncio
 
-    from simple_salesforce_pubsub import (
+    from aiosfpubsub import (
         PasswordAuthenticator,
         SalesforcePubSubClient,
     )
@@ -55,7 +55,7 @@ Each event is a mapping:
 
 ``replay_id``
     The event's position, as opaque :class:`bytes`. Pass it to
-    :meth:`~simple_salesforce_pubsub.SalesforcePubSubClient.commit_replay` to
+    :meth:`~aiosfpubsub.SalesforcePubSubClient.commit_replay` to
     record it, or store it yourself.
 
 ``id``
@@ -74,7 +74,7 @@ Authenticating
 --------------
 
 Three OAuth 2.0 flows are supported.
-:obj:`~simple_salesforce_pubsub.PasswordAuthenticator` uses the `username
+:obj:`~aiosfpubsub.PasswordAuthenticator` uses the `username
 password flow <password_auth_>`_, which Salesforce discourages for new
 integrations:
 
@@ -88,7 +88,7 @@ integrations:
         sandbox=True,
     )
 
-:obj:`~simple_salesforce_pubsub.RefreshTokenAuthenticator` uses the `refresh
+:obj:`~aiosfpubsub.RefreshTokenAuthenticator` uses the `refresh
 token flow <refresh_auth_>`_, with a refresh token you obtained earlier:
 
 .. code-block:: python
@@ -97,7 +97,7 @@ token flow <refresh_auth_>`_, with a refresh token you obtained earlier:
         consumer_key="...", consumer_secret="...", refresh_token="..."
     )
 
-:obj:`~simple_salesforce_pubsub.ClientCredentialsAuthenticator` uses the
+:obj:`~aiosfpubsub.ClientCredentialsAuthenticator` uses the
 `client credentials flow <client_credentials_auth_>`_, which sends no user
 credentials at all; the user it acts as is configured on the Salesforce side.
 Salesforce only issues these tokens from an org's `My Domain <my_domain_>`_
@@ -121,12 +121,12 @@ Publishing
     print(response.results[0].replay_id)
 
 A publish request can half succeed, so a rejected record raises
-:obj:`~simple_salesforce_pubsub.PublishError` by default. The whole response
+:obj:`~aiosfpubsub.PublishError` by default. The whole response
 is kept on the exception, which is where the accepted records' replay ids are:
 
 .. code-block:: python
 
-    from simple_salesforce_pubsub import PublishError
+    from aiosfpubsub import PublishError
 
     try:
         await client.publish(topic, records)

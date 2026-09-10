@@ -1,7 +1,7 @@
 Migration from aiosfstream
 ==========================
 
-.. py:currentmodule:: simple_salesforce_pubsub
+.. py:currentmodule:: aiosfpubsub
 
 aiosfstream_ speaks the Salesforce Streaming API over CometD_; this package
 speaks the Pub/Sub API over gRPC. The two protocols differ enough that the
@@ -28,7 +28,7 @@ which takes an authenticator rather than credentials directly:
         consumer_key="...", consumer_secret="...", username="...", password="..."
     )
 
-    # simple-salesforce-pubsub
+    # aiosfpubsub
     client = SalesforcePubSubClient(
         PasswordAuthenticator(
             consumer_key="...",
@@ -51,7 +51,7 @@ whole. Here each subscription is its own asynchronous generator:
     async for message in client:
         ...
 
-    # simple-salesforce-pubsub
+    # aiosfpubsub
     async for event in client.subscribe("/event/Foo__e"):
         ...
 

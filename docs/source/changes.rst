@@ -13,13 +13,13 @@ First release.
   applies backpressure instead of stalling once its budget is spent.
 - Automatic re-authentication for both subscription kinds, bounded by
   ``auth_retries``, resuming from the position the subscription was at.
-- Client side replay marker storage (:obj:`~simple_salesforce_pubsub.ReplayOption`,
-  :obj:`~simple_salesforce_pubsub.MappingStorage`,
-  :obj:`~simple_salesforce_pubsub.ConstantReplayId`) and server side tracking
+- Client side replay marker storage (:obj:`~aiosfpubsub.ReplayOption`,
+  :obj:`~aiosfpubsub.MappingStorage`,
+  :obj:`~aiosfpubsub.ConstantReplayId`) and server side tracking
   through managed event subscriptions, both governed by
-  :obj:`~simple_salesforce_pubsub.ReplayMarkerStoragePolicy`.
+  :obj:`~aiosfpubsub.ReplayMarkerStoragePolicy`.
 - Replay fallback for replay ids outside the retention window.
 - Publishing, one request at a time or over a stream, with per-record
-  failures reported through :obj:`~simple_salesforce_pubsub.PublishError`.
+  failures reported through :obj:`~aiosfpubsub.PublishError`.
 - ``PasswordAuthenticator``, ``RefreshTokenAuthenticator`` and
   ``ClientCredentialsAuthenticator``.

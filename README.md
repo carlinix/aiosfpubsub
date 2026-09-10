@@ -24,7 +24,7 @@ older Salesforce Streaming API (CometD).
 ## Installation
 
 ```bash
-pip install simple-salesforce-pubsub
+pip install aiosfpubsub
 ```
 
 Requires Python 3.11 or newer.
@@ -34,7 +34,7 @@ Requires Python 3.11 or newer.
 ```python
 import asyncio
 
-from simple_salesforce_pubsub import PasswordAuthenticator, SalesforcePubSubClient
+from aiosfpubsub import PasswordAuthenticator, SalesforcePubSubClient
 
 
 async def main():
@@ -67,7 +67,7 @@ process resume where it stopped:
 ```python
 import shelve
 
-from simple_salesforce_pubsub import ReplayOption, SalesforcePubSubClient
+from aiosfpubsub import ReplayOption, SalesforcePubSubClient
 
 with shelve.open("replay_markers") as markers:
     client = SalesforcePubSubClient(auth, replay=markers)
@@ -82,7 +82,7 @@ By default the replay marker advances as soon as an event is consumed. To
 advance it only after your own processing succeeded, use the manual policy:
 
 ```python
-from simple_salesforce_pubsub import ReplayMarkerStoragePolicy
+from aiosfpubsub import ReplayMarkerStoragePolicy
 
 client = SalesforcePubSubClient(
     auth,

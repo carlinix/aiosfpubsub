@@ -1,11 +1,11 @@
-"""Sphinx configuration for the simple-salesforce-pubsub documentation."""
+"""Sphinx configuration for the aiosfpubsub documentation."""
 
 from importlib.metadata import version as distribution_version
 
-project = "simple-salesforce-pubsub"
+project = "aiosfpubsub"
 author = "Ricardo Carlini Sperandio"
 copyright = "2026, Ricardo Carlini Sperandio"
-release = distribution_version("simple-salesforce-pubsub")
+release = distribution_version("aiosfpubsub")
 version = release
 
 extensions = [
@@ -25,12 +25,12 @@ pygments_style = "sphinx"
 root_doc = "index"
 templates_path = ["_templates"]
 
-htmlhelp_basename = "simplesalesforcepubsubdoc"
+htmlhelp_basename = "aiosfpubsubdoc"
 latex_documents = [
     (
         root_doc,
-        "simple-salesforce-pubsub.tex",
-        "simple-salesforce-pubsub Documentation",
+        "aiosfpubsub.tex",
+        "aiosfpubsub Documentation",
         author,
         "manual",
     ),
@@ -38,8 +38,8 @@ latex_documents = [
 man_pages = [
     (
         root_doc,
-        "simple-salesforce-pubsub",
-        "simple-salesforce-pubsub Documentation",
+        "aiosfpubsub",
+        "aiosfpubsub Documentation",
         [author],
         1,
     ),
@@ -47,10 +47,10 @@ man_pages = [
 texinfo_documents = [
     (
         root_doc,
-        "simple-salesforce-pubsub",
-        "simple-salesforce-pubsub Documentation",
+        "aiosfpubsub",
+        "aiosfpubsub Documentation",
         author,
-        "simple-salesforce-pubsub",
+        "aiosfpubsub",
         "Salesforce Pub/Sub API client for asyncio.",
         "Miscellaneous",
     ),

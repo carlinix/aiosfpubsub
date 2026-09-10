@@ -3,7 +3,7 @@ requires = ["uv_build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
 
 [project]
-name = "simple-salesforce-pubsub"
+name = "aiosfpubsub"
 version = "0.1.0"
 description = "Salesforce Pub/Sub API client for asyncio, replacing aiosfstream"
 readme = "README.md"
@@ -44,8 +44,8 @@ name = "Ricardo Carlini Sperandio"
 email = "rcarlini@gmail.com"
 
 [project.urls]
-Repository = "https://github.com/carlinix/simple-salesforce-pubsub"
-Issues = "https://github.com/carlinix/simple-salesforce-pubsub/issues"
+Repository = "https://github.com/carlinix/aiosfpubsub"
+Issues = "https://github.com/carlinix/aiosfpubsub/issues"
 
 [dependency-groups]
 build = [
@@ -91,8 +91,8 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["simple_salesforce_pubsub"]
-omit = ["simple_salesforce_pubsub/pubsub_api_pb2*.py"]
+source = ["aiosfpubsub"]
+omit = ["aiosfpubsub/pubsub_api_pb2*.py"]
 
 [tool.coverage.report]
 show_missing = true
@@ -100,11 +100,11 @@ skip_covered = true
 
 [tool.ruff]
 line-length = 88
-src = ["simple_salesforce_pubsub", "tests"]
+src = ["aiosfpubsub", "tests"]
 target-version = "py311"
 extend-exclude = [
-    "simple_salesforce_pubsub/pubsub_api_pb2.py",
-    "simple_salesforce_pubsub/pubsub_api_pb2_grpc.py",
+    "aiosfpubsub/pubsub_api_pb2.py",
+    "aiosfpubsub/pubsub_api_pb2_grpc.py",
 ]
 
 [tool.ruff.lint]
@@ -125,4 +125,4 @@ select = [
 "tests/**/*.py" = ["ANN"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["simple_salesforce_pubsub"]
+known-first-party = ["aiosfpubsub"]

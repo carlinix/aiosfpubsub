@@ -1,12 +1,12 @@
 import fastavro
 import pytest
 
-from simple_salesforce_pubsub.cdc import (
+from aiosfpubsub.cdc import (
     expand_bitmap,
     expand_bitmap_fields,
     expand_change_event_header,
 )
-from simple_salesforce_pubsub.exceptions import SchemaError
+from aiosfpubsub.exceptions import SchemaError
 
 ADDRESS = {
     "type": "record",

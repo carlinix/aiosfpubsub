@@ -1,5 +1,5 @@
-simple-salesforce-pubsub
-========================
+aiosfpubsub
+===========
 
 .. include:: ../../DESCRIPTION.rst
 

@@ -15,7 +15,7 @@ list, which is only meaningful once expanded against that schema:
 
 :func:`expand_change_event_header` rewrites all three bitmap lists of an event
 in place; the client applies it for you when
-:obj:`~simple_salesforce_pubsub.SalesforcePubSubClient` is created with
+:obj:`~aiosfpubsub.SalesforcePubSubClient` is created with
 ``expand_change_event_header=True``.
 """
 

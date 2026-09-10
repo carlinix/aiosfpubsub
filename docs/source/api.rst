@@ -1,7 +1,7 @@
 API Reference
 =============
 
-.. py:currentmodule:: simple_salesforce_pubsub
+.. py:currentmodule:: aiosfpubsub
 
 Client
 ------
@@ -48,9 +48,9 @@ Replay
 Change Data Capture
 -------------------
 
-.. automodule:: simple_salesforce_pubsub.cdc
+.. automodule:: aiosfpubsub.cdc
 
-.. py:currentmodule:: simple_salesforce_pubsub
+.. py:currentmodule:: aiosfpubsub
 
 .. autofunction:: expand_change_event_header
 
@@ -61,9 +61,9 @@ Change Data Capture
 Exceptions
 ----------
 
-.. automodule:: simple_salesforce_pubsub.exceptions
+.. automodule:: aiosfpubsub.exceptions
 
-.. py:currentmodule:: simple_salesforce_pubsub.exceptions
+.. py:currentmodule:: aiosfpubsub.exceptions
 
 .. autoexception:: PubSubException
     :members:

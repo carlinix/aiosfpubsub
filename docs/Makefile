@@ -4,7 +4,7 @@
 # You can set these variables from the command line.
 SPHINXOPTS    =
 SPHINXBUILD   = sphinx-build
-SPHINXPROJ    = simple-salesforce-pubsub
+SPHINXPROJ    = aiosfpubsub
 SOURCEDIR     = source
 BUILDDIR      = build
 

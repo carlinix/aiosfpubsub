@@ -7,21 +7,21 @@ import fastavro
 import grpc
 import pytest
 
-from simple_salesforce_pubsub import pubsub_api_pb2 as pb2
-from simple_salesforce_pubsub.auth import AuthenticatorBase
-from simple_salesforce_pubsub.client import (
+from aiosfpubsub import pubsub_api_pb2 as pb2
+from aiosfpubsub.auth import AuthenticatorBase
+from aiosfpubsub.client import (
     ReplayMarkerStoragePolicy,
     SalesforcePubSubClient,
     _StreamSlot,
 )
-from simple_salesforce_pubsub.exceptions import (
+from aiosfpubsub.exceptions import (
     AuthenticationError,
     ClientError,
     ClientInvalidOperation,
     PublishError,
     SchemaError,
 )
-from simple_salesforce_pubsub.replay import MappingStorage, ReplayOption
+from aiosfpubsub.replay import MappingStorage, ReplayOption
 
 METADATA = (
     ("accesstoken", "token"),
@@ -771,9 +771,9 @@ async def test_open_authenticates_and_builds_the_stub():
     client = SalesforcePubSubClient(AuthenticatorStub(), endpoint="pubsub.test:443")
     channel = MagicMock()
     with (
-        patch("simple_salesforce_pubsub.client.grpc.ssl_channel_credentials"),
+        patch("aiosfpubsub.client.grpc.ssl_channel_credentials"),
         patch(
-            "simple_salesforce_pubsub.client.grpc.aio.secure_channel",
+            "aiosfpubsub.client.grpc.aio.secure_channel",
             return_value=channel,
         ) as secure_channel,
     ):
@@ -795,9 +795,9 @@ async def test_context_manager_opens_and_closes():
     client = SalesforcePubSubClient(AuthenticatorStub())
     channel = MagicMock(close=AsyncMock())
     with (
-        patch("simple_salesforce_pubsub.client.grpc.ssl_channel_credentials"),
+        patch("aiosfpubsub.client.grpc.ssl_channel_credentials"),
         patch(
-            "simple_salesforce_pubsub.client.grpc.aio.secure_channel",
+            "aiosfpubsub.client.grpc.aio.secure_channel",
             return_value=channel,
         ),
     ):
@@ -1243,7 +1243,7 @@ def test_backoff_delay_doubles_and_is_capped():
         AuthenticatorStub(), retry_backoff=2.0, retry_backoff_max=10.0
     )
 
-    with patch("simple_salesforce_pubsub.client.random.uniform", lambda _, high: high):
+    with patch("aiosfpubsub.client.random.uniform", lambda _, high: high):
         ceilings = [client.backoff_delay(attempt) for attempt in range(1, 6)]
 
     assert ceilings == [2.0, 4.0, 8.0, 10.0, 10.0]
@@ -1261,9 +1261,7 @@ def test_backoff_delay_is_jittered():
 async def test_wait_before_retry_sleeps_for_the_backoff(client):
     client.backoff_delay = lambda attempt: 1.5 * attempt
 
-    with patch(
-        "simple_salesforce_pubsub.client.asyncio.sleep", new=AsyncMock()
-    ) as sleep:
+    with patch("aiosfpubsub.client.asyncio.sleep", new=AsyncMock()) as sleep:
         await client._wait_before_retry(2)
 
     sleep.assert_awaited_once_with(3.0)

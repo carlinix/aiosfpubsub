@@ -1,6 +1,6 @@
 import pytest
 
-from simple_salesforce_pubsub.exceptions import (
+from aiosfpubsub.exceptions import (
     AuthenticationError,
     ClientError,
     ClientInvalidOperation,

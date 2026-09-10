@@ -33,6 +33,10 @@ ruff and coverage, and simply never referenced by the docs. CI enforces
 
 ## Architecture
 
+### Name
+
+The package was renamed from `simple-salesforce-pubsub` on 2026-09-10. That name implied a relationship with [`simple-salesforce`](https://github.com/simple-salesforce/simple-salesforce), an unrelated REST/Bulk client by a different author, which this project neither imports nor depends on. `aiosfpubsub` follows the `aiosf*` convention of the sibling project. See "Remaining gaps" for the PyPI situation.
+
 ### Purpose and reference implementation
 
 This package is the successor to the user's own `aiosfstream` (CometD Streaming API client), retargeted at Salesforce's gRPC **Pub/Sub API** (https://developer.salesforce.com/docs/platform/pub-sub-api/overview). The reference implementation lives at **`/home/ricardo-sperandio/Projects/aiosfstream`** — read it before designing any new surface here.
@@ -99,7 +103,7 @@ The `.proto` is **not** vendored here; it must come from Salesforce's upstream `
 ```bash
 uv sync --group proto
 uv run python -m grpc_tools.protoc -I<proto_dir> \
-  --python_out=simple_salesforce_pubsub --grpc_python_out=simple_salesforce_pubsub \
+  --python_out=aiosfpubsub --grpc_python_out=aiosfpubsub \
   pubsub_api.proto
 ```
 
@@ -124,7 +128,8 @@ The proto is explicit that N `CommitReplayRequest`s can be batched into a single
 ## Remaining gaps
 
 - **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
-- **The repository has no remote.** `project.urls` points at `github.com/carlinix/simple-salesforce-pubsub`, which does not exist yet, and `ci.yml` triggers on `main` where the sibling uses `develop`. `twine check --strict` passing says nothing about whether those URLs resolve.
+- **The repository has no remote.** `project.urls` points at `github.com/carlinix/aiosfpubsub`, which does not exist yet (the name was free as of 2026-09-10), and `ci.yml` triggers on `main` where the sibling uses `develop`. `twine check --strict` passing says nothing about whether those URLs resolve.
+- **The distribution name is taken on PyPI.** `aiosfpubsub` belongs to `bensnyde/aiosfpubsub`, last released 2024-06-29 (0.0.6, 5 releases in one week, 0 stars, Unlicense). **`uv publish` will be rejected.** The plan is a voluntary transfer request to the author; the formal PEP 541 route is a poor fit, since this project is not a fork of that one, alternative names are available, and it has no users yet — three of the five things a requester must demonstrate. If the transfer does not come through, the fallback names verified free on 2026-09-10 are `aiosfeventbus` and `sfpubsub`. Do not publish under a substitute name without asking.
 - **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.
 - **`publish_stream()` does not enforce the 70 second liveness rule.** The proto requires a publish request with at least one event every 70 seconds to hold the stream open; a slow `batches` iterable silently loses it.
 - **`ProducerEvent.id` is never set.** The proto allows a user-provided id, and `PublishResult.correlation_key` is what correlates a result back to its record. `publish()` sends records only, so results can only be matched positionally.

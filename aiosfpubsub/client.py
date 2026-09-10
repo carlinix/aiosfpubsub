@@ -201,7 +201,7 @@ class SalesforcePubSubClient:
         :param expand_change_event_header: Whether to replace the bitmaps in \
         the ``ChangeEventHeader`` of a Change Data Capture event with the \
         field names they stand for. Off by default, because it rewrites the \
-        decoded payload. See :mod:`~simple_salesforce_pubsub.cdc`.
+        decoded payload. See :mod:`~aiosfpubsub.cdc`.
         :param num_requested: The number of events to request from the \
         server at a time. The subscription iterators replenish this budget \
         as events are consumed, which is what applies backpressure.

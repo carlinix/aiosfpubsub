@@ -37,7 +37,7 @@ from .replay import (
 )
 
 try:
-    __version__ = distribution_version("simple-salesforce-pubsub")
+    __version__ = distribution_version("aiosfpubsub")
 except PackageNotFoundError:  # pragma: no cover - source checkout
     __version__ = "0.0.0"
 

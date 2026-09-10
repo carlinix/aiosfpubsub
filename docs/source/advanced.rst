@@ -1,7 +1,7 @@
 Advanced usage
 ==============
 
-.. py:currentmodule:: simple_salesforce_pubsub
+.. py:currentmodule:: aiosfpubsub
 
 Replay
 ------
@@ -27,7 +27,7 @@ a :obj:`ReplayOption`:
 
 .. code-block:: python
 
-    from simple_salesforce_pubsub import ReplayOption, SalesforcePubSubClient
+    from aiosfpubsub import ReplayOption, SalesforcePubSubClient
 
     # only events published from now on, the default
     client = SalesforcePubSubClient(auth, replay=ReplayOption.NEW_EVENTS)
@@ -50,7 +50,7 @@ other backing store:
 
 .. code-block:: python
 
-    from simple_salesforce_pubsub import ReplayMarkerStorage
+    from aiosfpubsub import ReplayMarkerStorage
 
 
     class DatabaseStorage(ReplayMarkerStorage):
@@ -97,7 +97,7 @@ so, which is what you want when a failure has to lead to redelivery:
 
 .. code-block:: python
 
-    from simple_salesforce_pubsub import ReplayMarkerStoragePolicy
+    from aiosfpubsub import ReplayMarkerStoragePolicy
 
     client = SalesforcePubSubClient(
         auth,
@@ -202,13 +202,13 @@ other way:
 
 .. code-block:: python
 
-    from simple_salesforce_pubsub import expand_change_event_header
+    from aiosfpubsub import expand_change_event_header
 
     schema = await client.get_schema(event["schema_id"])
     expand_change_event_header(schema, event["payload"])
 
-:func:`~simple_salesforce_pubsub.expand_bitmap_fields` expands one bitmap list
-and :func:`~simple_salesforce_pubsub.expand_bitmap` a single bitmap against a
+:func:`~aiosfpubsub.expand_bitmap_fields` expands one bitmap list
+and :func:`~aiosfpubsub.expand_bitmap` a single bitmap against a
 given field list. All three raise :obj:`~exceptions.SchemaError` if a bitmap
 cannot be expanded against the schema, rather than returning a partial answer.
 

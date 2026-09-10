@@ -1,7 +1,7 @@
 Salesforce Pub/Sub API client for asyncio
 =========================================
 
-:mod:`simple_salesforce_pubsub` is a Python client for the `Salesforce
+:mod:`aiosfpubsub` is a Python client for the `Salesforce
 Pub/Sub API <api_>`_, built on gRPC_ and asyncio_. It is the successor to
 aiosfstream_, which targeted the older Salesforce Streaming API over CometD_.
 

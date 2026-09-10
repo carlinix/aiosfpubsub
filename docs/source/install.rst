@@ -3,7 +3,7 @@ Installation
 
 .. code-block:: console
 
-    $ pip install simple-salesforce-pubsub
+    $ pip install aiosfpubsub
 
 Python 3.11 or newer is required.
 

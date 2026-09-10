@@ -1,7 +1,7 @@
 import pytest
 
-from simple_salesforce_pubsub import pubsub_api_pb2 as pb2
-from simple_salesforce_pubsub.replay import (
+from aiosfpubsub import pubsub_api_pb2 as pb2
+from aiosfpubsub.replay import (
     ConstantReplayId,
     MappingStorage,
     ReplayMarkerStorage,

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp.client_exceptions import ClientConnectionError
 
-from simple_salesforce_pubsub.auth import (
+from aiosfpubsub.auth import (
     SANDBOX_TOKEN_URL,
     TOKEN_URL,
     AuthenticatorBase,
@@ -12,7 +12,7 @@ from simple_salesforce_pubsub.auth import (
     PasswordAuthenticator,
     RefreshTokenAuthenticator,
 )
-from simple_salesforce_pubsub.exceptions import AuthenticationError
+from aiosfpubsub.exceptions import AuthenticationError
 
 TOKEN_RESPONSE = {
     "access_token": "token",
@@ -43,9 +43,7 @@ def session_returning(status, payload):
     session.post = AsyncMock(return_value=response)
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    return patch("simple_salesforce_pubsub.auth.ClientSession", return_value=session), (
-        session
-    )
+    return patch("aiosfpubsub.auth.ClientSession", return_value=session), (session)
 
 
 def test_token_url_depends_on_sandbox():

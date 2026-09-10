@@ -1,36 +1,83 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
 
 [project]
 name = "simple-salesforce-pubsub"
 version = "0.1.0"
-description = "Salesforce Pub/Sub API client using gRPC and asyncio, replacing aiosfstream"
-authors = [
-    { name="Ricardo Sperandio" }
-]
+description = "Salesforce Pub/Sub API client for asyncio, replacing aiosfstream"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+keywords = [
+    "aiohttp",
+    "asyncio",
+    "avro",
+    "grpc",
+    "pubsub",
+    "salesforce",
+    "streaming",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
 dependencies = [
-    "grpcio>=1.83.1",
     "aiohttp>=3.8.0",
+    "fastavro>=1.7.0",
+    "grpcio>=1.83.1",
     "protobuf>=7.35.1",
-    "fastavro>=1.7.0"
 ]
 
-[project.optional-dependencies]
-dev = [
-    "coverage[toml]>=7.10",
+[[project.authors]]
+name = "Ricardo Carlini Sperandio"
+email = "rcarlini@gmail.com"
+
+[project.urls]
+Repository = "https://github.com/carlinix/simple-salesforce-pubsub"
+Issues = "https://github.com/carlinix/simple-salesforce-pubsub/issues"
+
+[dependency-groups]
+build = [
+    "check-wheel-contents>=0.6,<1",
+    "twine>=6,<7",
+]
+docs = [
+    "sphinx>=8.2,<10",
+]
+lint = [
+    "ruff>=0.12,<1",
+]
+proto = [
     "grpcio-tools>=1.83.1",
-    "pytest>=8.4.0",
-    "pytest-asyncio>=1.1.0",
-    "ruff>=0.12"
+]
+test = [
+    "coverage[toml]>=7.10,<8",
+    "pytest>=8.4,<10",
+    "pytest-asyncio>=1.1,<2",
 ]
 
-[tool.setuptools.package-data]
-simple_salesforce_pubsub = ["py.typed"]
-
-[tool.setuptools]
-packages = ["simple_salesforce_pubsub"]
+[tool.uv.build-backend]
+module-root = ""
+source-exclude = [
+    "docs/build",
+]
+source-include = [
+    ".readthedocs.yaml",
+    "DESCRIPTION.rst",
+    "docs/**",
+    "tests/**",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.4"
@@ -55,8 +102,10 @@ skip_covered = true
 line-length = 88
 src = ["simple_salesforce_pubsub", "tests"]
 target-version = "py311"
-extend-exclude = ["simple_salesforce_pubsub/pubsub_api_pb2.py",
-                  "simple_salesforce_pubsub/pubsub_api_pb2_grpc.py"]
+extend-exclude = [
+    "simple_salesforce_pubsub/pubsub_api_pb2.py",
+    "simple_salesforce_pubsub/pubsub_api_pb2_grpc.py",
+]
 
 [tool.ruff.lint]
 ignore = ["ANN401"]

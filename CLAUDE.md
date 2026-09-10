@@ -4,19 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment & Commands
 
-A local `venv/` (Python 3.14) holds the installed dependencies; prefer `venv/bin/python` over a bare `python`.
+The project is managed with `uv`, which owns `.venv`. The older `venv/` in the
+working tree predates the migration and is gitignored; don't add to it.
 
 ```bash
-venv/bin/python -m pip install -e ".[dev]"   # editable install with test extras
-venv/bin/python -m pytest                    # run the suite
-venv/bin/python -m pytest -k replenish       # single test by name pattern
-venv/bin/python -m pytest tests/test_client.py::test_publish_wraps_rpc_errors
-venv/bin/python -m ruff check .              # lint
-venv/bin/python -m coverage run -m pytest    # tests with branch coverage
-venv/bin/python -m coverage report
+uv sync --all-groups                              # create/refresh .venv
+uv run coverage run -m pytest                     # tests with branch coverage
+uv run coverage report
+uv run pytest -k replenish                        # single test by name pattern
+uv run pytest tests/test_client.py::test_publish_wraps_rpc_errors
+uv run ruff check . && uv run ruff format .       # lint and format
+uv run sphinx-build -b html -W docs/source docs/build/html
+uv build                                          # wheel + sdist
 ```
 
-`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from both ruff and coverage. `ruff format` is used — the sibling project's CI enforces `ruff format --check`, so run `venv/bin/python -m ruff format .` before committing.
+Dependency groups mirror the sibling project: `test`, `lint`, `docs`, `build`,
+plus `proto` for `grpcio-tools`. There is no `[project.optional-dependencies]`,
+so `pip install -e ".[dev]"` no longer exists.
+
+`asyncio_mode = "strict"`, so every async test needs an explicit
+`@pytest.mark.asyncio`. The suite is at 100% branch coverage of the
+hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from
+ruff, coverage and the docs. CI enforces `ruff format --check` and a
+`-W` (warnings-as-errors) docs build, so run both before committing.
 
 ## Architecture
 
@@ -28,7 +38,11 @@ Names and argument shapes mirror `aiosfstream` wherever the semantics survive th
 
 ### Conventions come from the sibling project
 
-`/home/ricardo-sperandio/Projects/aiosfstream/pyproject.toml` is the house style. Adopted here: ruff (`line-length = 88`, `select = [ANN, ASYNC, B, C4, E, F, I, SIM, UP]`, `ignore = [ANN401]`, `target-version = "py311"`), pytest (`--strict-config --strict-markers -ra`, `asyncio_mode = "strict"`), branch coverage, and the `py.typed` marker. Still on the sibling and not here: the `uv_build` backend with `uv.lock` (this project still uses setuptools), Sphinx docs, and the GitHub Actions workflows.
+`/home/ricardo-sperandio/Projects/aiosfstream` is the house style, and this project now mirrors it: `uv_build` backend with `module-root = ""` (the package sits at the repo root, not under `src/`), `uv.lock`, dependency groups, ruff config, pytest config, branch coverage, `py.typed`, `docs/source` layout with `.readthedocs.yaml`, and a `ci.yml` of the same shape.
+
+`LICENSE.txt` carries **two** copyright lines. `auth.py` and `replay.py` are derived from aiosfstream, originally by Róbert Márki, so his notice is retained alongside the user's. Don't drop it.
+
+The one workflow deliberately **not** copied is `release.yml`: the sibling publishes to PyPI and a GCP Artifact Registry under its own package name and secrets, which needs the user's decision on target registry and credentials.
 
 ### Modules
 
@@ -69,7 +83,8 @@ One residual limitation, asserted in `test_manual_policy_without_a_marker_cannot
 The `.proto` is **not** vendored here; it must come from Salesforce's upstream `developerforce/pub-sub-api` repository.
 
 ```bash
-venv/bin/python -m grpc_tools.protoc -I<proto_dir> \
+uv sync --group proto
+uv run python -m grpc_tools.protoc -I<proto_dir> \
   --python_out=simple_salesforce_pubsub --grpc_python_out=simple_salesforce_pubsub \
   pubsub_api.proto
 ```
@@ -80,8 +95,14 @@ venv/bin/python -m grpc_tools.protoc -I<proto_dir> \
 
 `replay_fallback` mirrors `aiosfstream`: when the server rejects the replay id the subscription started from — typically because it aged out of the retention window — the marker is discarded and the subscription is retried once from the fallback option. Unlike the Streaming API there is no error code for this; the proto's `ErrorCode` covers only `{UNKNOWN, PUBLISH, COMMIT}`, both publish-side. So `is_replay_id_error()` matches on the gRPC status instead (`INVALID_ARGUMENT` whose details mention "replay") and is a `staticmethod` precisely so it can be overridden when Salesforce changes the wording. **If replay fallback stops triggering, look there first.**
 
+### Publish failures are per record
+
+`Publish` answers with a `PublishResult` per submitted record, so a batch can half succeed. `publish()` raises `PublishError` on any rejected record, and the exception keeps the whole `PublishResponse` — the accepted records' replay ids live there and would otherwise be lost. `raise_on_error=False` returns the response instead.
+
+`publish_stream()` deliberately does **not** raise: tearing down a stream meant to stay open over one bad batch defeats its purpose. It exposes `raise_for_results()` so a caller can opt into the same error per batch. Keep that asymmetry — it is a decision, not an oversight.
+
 ## Remaining gaps
 
-- **No Sphinx docs and no `uv_build` migration.** The sibling has both, plus `uv.lock` and GitHub Actions workflows.
-- **`ManagedSubscription` has no re-auth path.** `subscribe()` re-establishes itself on `UNAUTHENTICATED`; the managed path propagates it as a `ClientError`. The server holds the position, so a caller can simply iterate again, but the asymmetry is real.
-- **`publish()` and `publish_stream()` don't inspect `PublishResult.error`.** A per-record failure is reported in the response, not raised.
+- **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
+- **The repository has no remote.** `project.urls` points at `github.com/carlinix/simple-salesforce-pubsub`, which does not exist yet, and `ci.yml` triggers on `main`.
+- **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.

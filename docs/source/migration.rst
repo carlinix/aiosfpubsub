@@ -12,8 +12,9 @@ Authenticators
 --------------
 
 Unchanged. :obj:`PasswordAuthenticator`,
-:obj:`RefreshTokenAuthenticator`, :obj:`ClientCredentialsAuthenticator`
-and :obj:`JWTBearerAuthenticator` take the same arguments as before.
+:obj:`RefreshTokenAuthenticator`, :obj:`ClientCredentialsAuthenticator`,
+:obj:`JWTBearerAuthenticator` and :obj:`SOAPAuthenticator` take the same
+arguments as before.
 
 Client
 ------

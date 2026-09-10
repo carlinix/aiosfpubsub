@@ -7,6 +7,9 @@ from http import HTTPStatus
 from os import PathLike
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 from aiohttp import ClientSession
 from aiohttp.client_exceptions import ClientError as AiohttpClientError
@@ -28,6 +31,25 @@ JWT_ALGORITHM = "RS256"
 #: after it is signed, so a short window costs nothing and limits the value of
 #: a leaked assertion.
 JWT_EXPIRATION = 180
+LOGIN_DOMAIN = "login"
+SANDBOX_LOGIN_DOMAIN = "test"
+#: Salesforce API version of the SOAP login endpoint. ``login()`` is already
+#: unavailable in version 65.0 and later, so the value has to stay below that
+#: cutoff for the flow to work at all.
+SOAP_API_VERSION = "59.0"
+SOAP_LOGIN_ENVELOPE = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<env:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+    'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+    'xmlns:env="http://schemas.xmlsoap.org/soap/envelope/">'
+    "<env:Body>"
+    '<n1:login xmlns:n1="urn:partner.soap.sforce.com">'
+    "<n1:username>{username}</n1:username>"
+    "<n1:password>{password}</n1:password>"
+    "</n1:login>"
+    "</env:Body>"
+    "</env:Envelope>"
+)
 
 
 class AuthenticatorBase(ABC):
@@ -453,3 +475,223 @@ class JWTBearerAuthenticator(AuthenticatorBase):
             }
             response = await session.post(self._token_url, data=data)
             return response.status, await response.json()
+
+
+class SOAPAuthenticator(AuthenticatorBase):
+    """Authenticator for using the SOAP API's ``login()`` call
+
+    Unlike every OAuth flow, this one needs no connected app: it exchanges a
+    username and a password for a session ID, which the Pub/Sub API accepts in
+    place of an access token. It is the flow Salesforce's own Pub/Sub API
+    reference client uses.
+
+    That is its only advantage, and it comes with an expiry date. ``login()``
+    is already unavailable in SOAP API version 65.0 and later, and Salesforce
+    retires it from versions 31.0 through 64.0 in the Summer '27 release.
+    Prefer :py:obj:`JWTBearerAuthenticator` or
+    :py:obj:`ClientCredentialsAuthenticator` for new integrations, and reach
+    for this class only when a connected app is genuinely out of reach.
+    """
+
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        security_token: str = "",
+        domain: str | None = None,
+        sandbox: bool = False,
+    ) -> None:
+        """
+        :param username: Salesforce username. To log in to a sandbox, the \
+        name of the sandbox has to be appended to it, so a production \
+        username of ``user@acme.com`` becomes ``user@acme.com.uat`` for a \
+        sandbox named ``uat``
+        :param password: Salesforce password
+        :param security_token: The user's security token. It is required \
+        unless the caller's IP falls inside the trusted IP range of the \
+        user's profile. It is appended to *password*, which is what the \
+        SOAP endpoint expects
+        :param domain: The host to log in against, without a scheme and \
+        without the ``.salesforce.com`` suffix, such as ``mycompany.my``. \
+        The default is :py:data:`LOGIN_DOMAIN`, or \
+        :py:data:`SANDBOX_LOGIN_DOMAIN` if *sandbox* is ``True``
+        :param sandbox: Marks whether the authentication has to be done \
+        for a sandbox org or for a production org
+        :raise ValueError: If *domain* is empty, looks like a URL, or \
+        carries the ``.salesforce.com`` suffix
+        """
+        super().__init__(sandbox=sandbox)
+        #: Salesforce username
+        self.username = username
+        #: Salesforce password
+        self.password = password
+        #: The user's security token
+        self.security_token = security_token
+        #: The host that login requests are sent to
+        self.domain = self._resolve_domain(domain, sandbox)
+
+    @staticmethod
+    def _resolve_domain(domain: str | None, sandbox: bool) -> str:
+        """Determine the host to log in against
+
+        :param domain: An explicit domain, or ``None`` to derive one from \
+        *sandbox*
+        :param sandbox: Marks whether a sandbox org is being addressed
+        :return: The validated domain
+        :raise ValueError: If *domain* cannot name a Salesforce host
+        """
+        if domain is None:
+            return SANDBOX_LOGIN_DOMAIN if sandbox else LOGIN_DOMAIN
+
+        value = domain.strip().strip("/")
+        if not value:
+            raise ValueError("domain must not be empty")
+        if "://" in value:
+            raise ValueError(
+                f"domain must be a bare domain name, not a URL: {domain!r}"
+            )
+        if value.endswith(".salesforce.com"):
+            raise ValueError(
+                f"domain must not carry the .salesforce.com suffix: {domain!r}"
+            )
+        return value
+
+    @property
+    def _token_url(self) -> str:
+        """The SOAP login endpoint that authentication requests are sent to"""
+        return (
+            f"https://{self.domain}.salesforce.com/services/Soap/u/{SOAP_API_VERSION}"
+        )
+
+    def __repr__(self) -> str:
+        """Formal string representation
+
+        The password and the security token are omitted rather than
+        shortened, since an abbreviated secret would still disclose part of
+        it.
+        """
+        cls_name = type(self).__name__
+        return (
+            f"{cls_name}(username={reprlib.repr(self.username)}, "
+            f"domain={reprlib.repr(self.domain)})"
+        )
+
+    def _create_envelope(self) -> str:
+        """Create the SOAP envelope of the login request
+
+        :return: The envelope, with the credentials escaped for XML
+        """
+        return SOAP_LOGIN_ENVELOPE.format(
+            username=escape(self.username),
+            password=escape(self.password + self.security_token),
+        )
+
+    @staticmethod
+    def _find_value(root: ElementTree.Element, name: str) -> str | None:
+        """Find the text of the first element named *name*
+
+        The response carries several namespaces which differ between a
+        successful login and a fault, so elements are matched on their local
+        name. Salesforce's own reference client indexes the response
+        positionally instead, which breaks on any optional element.
+
+        :param root: The root of the parsed response
+        :param name: Local name of the element to look for
+        :return: The element's text, or ``None`` if there is no such element
+        """
+        for element in root.iter():
+            if element.tag.rpartition("}")[2] == name and element.text:
+                return element.text
+        return None
+
+    def _parse_fault(self, root: ElementTree.Element, body: str) -> dict[str, Any]:
+        """Describe a failed login in the shape the OAuth flows return
+
+        :param root: The root of the parsed response
+        :param body: The raw response body, used when the fault carries no \
+        recognizable detail
+        :return: The error and its description
+        """
+        return {
+            "error": self._find_value(root, "exceptionCode") or "unknown_error",
+            "error_description": (
+                self._find_value(root, "exceptionMessage")
+                or self._find_value(root, "faultstring")
+                or body
+            ),
+        }
+
+    def _parse_login_result(self, root: ElementTree.Element) -> dict[str, Any]:
+        """Translate a successful login response into token attributes
+
+        The response names no identity URL, so one is assembled from the
+        ``organizationId`` of the login result's ``userInfo`` and its
+        ``userId``. That is where Salesforce's reference client takes the
+        ``tenantid`` call metadata from, and the assembled URL has the shape
+        :py:meth:`~AuthenticatorBase.get_tenant_id` expects, so the base
+        class derives the org ID without a special case.
+
+        Both segments are required: an identity URL missing either one no
+        longer has the org ID second from last, and would silently yield the
+        wrong tenant rather than a usable error.
+
+        :param root: The root of the parsed response
+        :return: The session ID, the URL of the org's instance and the \
+        identity URL
+        :raise AuthenticationError: If the response carries no session, or \
+        nothing to derive the org ID from
+        """
+        session_id = self._find_value(root, "sessionId")
+        server_url = self._find_value(root, "serverUrl")
+        organization_id = self._find_value(root, "organizationId")
+        user_id = self._find_value(root, "userId")
+        if session_id is None or server_url is None:
+            self._clear_credentials()
+            raise AuthenticationError(
+                "Authentication failed", "The login response carries no session"
+            )
+        if organization_id is None or user_id is None:
+            self._clear_credentials()
+            raise AuthenticationError(
+                "Authentication failed",
+                "The login response carries no organization id and user id, "
+                "which every Pub/Sub API call needs for its tenantid metadata",
+            )
+
+        parts = urlsplit(server_url)
+        return {
+            "access_token": session_id,
+            # The SOAP response names no token type. The Pub/Sub API takes a
+            # session ID in place of an access token, so it is sent the way
+            # an access token is.
+            "token_type": "Bearer",
+            "instance_url": f"{parts.scheme}://{parts.netloc}",
+            "id": (
+                f"https://{self.domain}.salesforce.com/id/{organization_id}/{user_id}"
+            ),
+        }
+
+    async def _authenticate(self) -> tuple[int, dict[str, Any]]:
+        headers = {
+            "Content-Type": "text/xml; charset=UTF-8",
+            "SOAPAction": "login",
+        }
+        async with ClientSession() as session:
+            response = await session.post(
+                self._token_url,
+                data=self._create_envelope().encode(),
+                headers=headers,
+            )
+            body = await response.text()
+
+        try:
+            root = ElementTree.fromstring(body)
+        except ElementTree.ParseError:
+            self._clear_credentials()
+            raise AuthenticationError(
+                "Authentication failed", "The login response is not valid XML"
+            ) from None
+
+        if response.status != HTTPStatus.OK:
+            return response.status, self._parse_fault(root, body)
+        return response.status, self._parse_login_result(root)

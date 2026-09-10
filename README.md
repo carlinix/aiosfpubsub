@@ -19,7 +19,7 @@ older Salesforce Streaming API (CometD).
 - Change Data Capture header bitmaps expanded into field names.
 - Streaming publish, and cancellable subscriptions.
 - Authenticators matching `aiosfstream` for easy migration, including the
-  OAuth 2.0 Client Credentials flow.
+  OAuth 2.0 Client Credentials and JWT Bearer flows.
 
 ## Installation
 
@@ -27,7 +27,8 @@ older Salesforce Streaming API (CometD).
 pip install aiosfpubsub
 ```
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer. `JWTBearerAuthenticator` signs its assertion
+with PyJWT, which comes with the `jwt` extra: `pip install aiosfpubsub[jwt]`.
 
 ## Usage
 
@@ -202,8 +203,9 @@ async for response in client.publish_stream(topic, batches()):
 
 ## Migration from `aiosfstream`
 
-- **Authentication:** `PasswordAuthenticator`, `RefreshTokenAuthenticator` and
-  `ClientCredentialsAuthenticator` take the same arguments as before.
+- **Authentication:** `PasswordAuthenticator`, `RefreshTokenAuthenticator`,
+  `ClientCredentialsAuthenticator` and `JWTBearerAuthenticator` take the same
+  arguments as before.
 - **Client:** replace `SalesforceStreamingClient` with
   `SalesforcePubSubClient`, which takes an authenticator rather than
   credentials directly.

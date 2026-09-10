@@ -7,6 +7,7 @@ from importlib.metadata import version as distribution_version
 from .auth import (
     AuthenticatorBase,
     ClientCredentialsAuthenticator,
+    JWTBearerAuthenticator,
     PasswordAuthenticator,
     RefreshTokenAuthenticator,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "ClientError",
     "ClientInvalidOperation",
     "ConstantReplayId",
+    "JWTBearerAuthenticator",
     "ManagedSubscription",
     "MappingStorage",
     "PasswordAuthenticator",

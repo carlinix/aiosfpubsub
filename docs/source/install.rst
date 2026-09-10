@@ -12,6 +12,13 @@ which pip installs for you. The Pub/Sub API stubs are generated from
 Salesforce's ``pubsub_api.proto`` and ship with the package, so
 ``grpcio-tools`` is only needed to regenerate them.
 
+:obj:`~aiosfpubsub.JWTBearerAuthenticator` signs its assertion with PyJWT_,
+which is not installed by default:
+
+.. code-block:: console
+
+    $ pip install aiosfpubsub[jwt]
+
 Salesforce setup
 ----------------
 

@@ -21,8 +21,9 @@ uv build                                          # wheel + sdist
 ```
 
 Dependency groups mirror the sibling project: `test`, `lint`, `docs`, `build`,
-plus `proto` for `grpcio-tools`. There is no `[project.optional-dependencies]`,
-so `pip install -e ".[dev]"` no longer exists.
+plus `proto` for `grpcio-tools`. The only `[project.optional-dependencies]`
+entry is `jwt` (`pyjwt[crypto]`, for `JWTBearerAuthenticator`); there is no
+`dev` extra, so `pip install -e ".[dev]"` no longer exists.
 
 `asyncio_mode = "strict"`, so every async test needs an explicit
 `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the

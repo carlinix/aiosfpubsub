@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment & Commands
 
-The project is managed with `uv`, which owns `.venv`. The older `venv/` in the
-working tree predates the migration and is gitignored; don't add to it.
+The project is managed with `uv`, which owns `.venv`. A stale `venv/` from
+before the migration may still be in the working tree — it holds an editable
+install and tooling that no longer match `uv.lock`. It is gitignored and safe
+to delete; never run anything from it.
 
 ```bash
 uv sync --all-groups                              # create/refresh .venv
@@ -25,7 +27,8 @@ so `pip install -e ".[dev]"` no longer exists.
 `asyncio_mode = "strict"`, so every async test needs an explicit
 `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the
 hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from
-ruff, coverage and the docs. CI enforces `ruff format --check` and a
+ruff and coverage, and simply never referenced by the docs. CI enforces
+`ruff format --check` and a
 `-W` (warnings-as-errors) docs build, so run both before committing.
 
 ## Architecture
@@ -104,5 +107,5 @@ uv run python -m grpc_tools.protoc -I<proto_dir> \
 ## Remaining gaps
 
 - **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
-- **The repository has no remote.** `project.urls` points at `github.com/carlinix/simple-salesforce-pubsub`, which does not exist yet, and `ci.yml` triggers on `main`.
+- **The repository has no remote.** `project.urls` points at `github.com/carlinix/simple-salesforce-pubsub`, which does not exist yet, and `ci.yml` triggers on `main` where the sibling uses `develop`. `twine check --strict` passing says nothing about whether those URLs resolve.
 - **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.

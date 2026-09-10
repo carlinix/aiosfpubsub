@@ -4,7 +4,7 @@ from importlib.metadata import version as distribution_version
 
 project = "simple-salesforce-pubsub"
 author = "Ricardo Carlini Sperandio"
-copyright = "2026, Ricardo Carlini Sperandio"  # noqa: A001
+copyright = "2026, Ricardo Carlini Sperandio"
 release = distribution_version("simple-salesforce-pubsub")
 version = release
 

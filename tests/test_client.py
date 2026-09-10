@@ -1401,3 +1401,81 @@ async def test_managed_subscribe_gives_up_after_unproductive_reconnects(client):
     with pytest.raises(ClientError, match="closed by the server 1 times"):
         async for _ in client.managed_subscribe(developer_name="sub"):
             pass  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_backoff_precedes_the_token_request(client):
+    """A rejection re-authentication can't fix must not hammer the endpoint"""
+    order = []
+    client._wait_before_retry = AsyncMock(side_effect=lambda a: order.append("wait"))
+    client.authenticator.authenticate = AsyncMock(
+        side_effect=lambda: order.append("authenticate")
+    )
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([fetch_response([consumer_event(b"\x01")])]),
+    )
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert order == ["wait", "authenticate", "wait", "authenticate"]
+
+
+@pytest.mark.asyncio
+async def test_a_productive_stream_reauthenticates_without_waiting(client):
+    delays = []
+    client._wait_before_retry = AsyncMock(side_effect=lambda a: delays.append(a))
+    client.stub.Subscribe = call_sequence(
+        CallStub(
+            [fetch_response([consumer_event(b"\x01")])],
+            error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+        ),
+        CallStub([fetch_response([consumer_event(b"\x02")])]),
+    )
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert delays == []
+
+
+@pytest.mark.asyncio
+async def test_a_keepalive_anchors_a_stream_that_is_then_closed(client):
+    """A reconnect must not silently skip what was published while waiting
+
+    The stream delivered no event, so there is no marker to resume from, but
+    the keepalive named a concrete position and the reconnect uses it instead
+    of asking for NEW_EVENTS all over again.
+    """
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    closed = CallStub([fetch_response(latest_replay_id=b"\x0a")], end_with="close")
+    reopened = CallStub([])
+    client.stub.Subscribe = call_sequence(closed, reopened)
+
+    async for _ in client.subscribe("/event/X__e"):  # pragma: no cover - no events
+        pass
+
+    assert closed.requests[0].replay_preset == pb2.LATEST
+    assert reopened.requests[0].replay_preset == pb2.CUSTOM
+    assert reopened.requests[0].replay_id == b"\x0a"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_closed_before_any_response_cannot_anchor(client):
+    """A known limitation, asserted so a change to it is deliberate
+
+    The stream produced nothing at all, so no position is known and, with an
+    empty replay storage, the reconnect can only ask for NEW_EVENTS again.
+    Anything published in between is skipped. A storing replay storage or
+    ALL_EVENTS avoids it.
+    """
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    reopened = CallStub([fetch_response([consumer_event(b"\x01")])])
+    client.stub.Subscribe = call_sequence(CallStub([], end_with="close"), reopened)
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert reopened.requests[0].replay_preset == pb2.LATEST

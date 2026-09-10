@@ -203,7 +203,9 @@ class SalesforcePubSubClient:
         re-authenticate and resume before giving up. The count is reset \
         whenever a resumed subscription delivers an event, so it only bounds \
         failures the re-authentication can't fix, such as revoked \
-        credentials.
+        credentials. The backoff is applied before the token request, so a \
+        rejection re-authentication can't fix does not hit the token endpoint \
+        at full speed.
         :param reconnect_retries: How many times in a row a subscription may \
         be re-established after the server closes its stream without it \
         delivering an event. Reset the same way as ``auth_retries``, so a \
@@ -492,8 +494,12 @@ class SalesforcePubSubClient:
                         "Access token rejected, re-authenticating and resuming %r.",
                         topic_name,
                     )
+                    # wait before re-authenticating, not after: a rejection
+                    # that re-authentication can't fix would otherwise hit the
+                    # token endpoint at full speed
+                    if not delivered:
+                        await self._wait_before_retry(attempts)
                     await self.authenticator.authenticate()
-                    await self._wait_before_retry(attempts)
                 except _ReplayIdRejected as error:
                     if fallback is None or fallback_used:
                         raise ClientError(
@@ -932,9 +938,10 @@ class ManagedSubscription:
                         "Access token rejected, re-authenticating and resuming %r.",
                         self.name,
                     )
+                    if not delivered:
+                        await client._wait_before_retry(attempts)
                     await client.authenticator.authenticate()
                     self._requeue_pending_commits()
-                    await client._wait_before_retry(attempts)
                 else:
                     reconnects = 0 if delivered else reconnects + 1
                     if reconnects > client.reconnect_retries:

@@ -228,14 +228,21 @@ originally started at. That last part matters:
 recomputing the position from scratch would restart from the default replay
 option and drop everything published in between.
 
+A keepalive is enough to anchor a subscription, so a stream that sat idle and
+was then closed resumes exactly where it was rather than skipping whatever was
+published during the backoff.
+
 .. note::
 
-    One case cannot be recovered. Under
-    :obj:`~ReplayMarkerStoragePolicy.MANUAL` with
-    :obj:`~ReplayOption.NEW_EVENTS`, if the very first response already
-    carries events and none of them is committed, no position precedes them,
-    so the subscription restarts from :obj:`~ReplayOption.NEW_EVENTS`. Commit
-    as you go, or start from a stored marker, if that matters to you.
+    Two cases cannot be recovered, both requiring
+    :obj:`~ReplayOption.NEW_EVENTS` with nothing stored: a stream whose very
+    first response already carries events, none of which is committed under
+    :obj:`~ReplayMarkerStoragePolicy.MANUAL`, and a stream closed before it
+    produced any response at all. Neither leaves a position that precedes what
+    was missed, so the subscription restarts from
+    :obj:`~ReplayOption.NEW_EVENTS`. Commit as you go, use a storing replay
+    storage, or start from :obj:`~ReplayOption.ALL_EVENTS`, if that matters to
+    you.
 
 Stopping a subscription
 -----------------------

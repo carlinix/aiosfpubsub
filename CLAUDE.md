@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Environment & Commands
+
+A local `venv/` (Python 3.14) holds the installed dependencies; prefer `venv/bin/python` over a bare `python`.
+
+```bash
+venv/bin/python -m pip install -e ".[dev]"   # editable install with test extras
+venv/bin/python -m pytest                    # run the suite
+venv/bin/python -m pytest -k replenish       # single test by name pattern
+venv/bin/python -m pytest tests/test_client.py::test_publish_wraps_rpc_errors
+```
+
+`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`.
+
+No linter or formatter is configured or installed *here* — do not invent commands. See "Conventions" below for the standard this project is expected to adopt.
+
+## Architecture
+
+### Purpose and reference implementation
+
+This package is the successor to the user's own `aiosfstream` (CometD Streaming API client), retargeted at Salesforce's gRPC **Pub/Sub API** (https://developer.salesforce.com/docs/platform/pub-sub-api/overview). The reference implementation lives at **`/home/ricardo-sperandio/Projects/aiosfstream`** — read it before designing any new surface here.
+
+Names and argument shapes mirror `aiosfstream` wherever the semantics survive the transport change (`PasswordAuthenticator`, `ClientCredentialsAuthenticator`, `ReplayOption`, `MappingStorage`, `ReplayMarkerStoragePolicy`), so migration is mostly mechanical. **The client surface is still not API-compatible**: `aiosfstream.Client` is async-iterable with `subscribe`/`unsubscribe` multiplexed over one CometD connection, whereas `SalesforcePubSubClient.subscribe()` returns one async generator per topic, each backed by its own gRPC stream, and there is no `unsubscribe` — you stop iterating.
+
+### Conventions come from the sibling project
+
+`/home/ricardo-sperandio/Projects/aiosfstream/pyproject.toml` is the house style and the target for this project: `uv_build` backend, ruff (`line-length = 88`, `select = [ANN, ASYNC, B, C4, E, F, I, SIM, UP]`, `target-version = "py311"`), branch coverage, a `py.typed` marker, and Sphinx docs. Only the pytest half of that config has been adopted here so far; ruff, coverage, `py.typed` and uv have not.
+
+### Modules
+
+- `auth.py` — `AuthenticatorBase` performs the OAuth2 token exchange via `aiohttp`; subclasses supply only the form body in `_authenticate()`. The base derives `tenant_id` (the org ID) from the OAuth `id` URL, and `get_grpc_metadata()` turns the credentials into the `accesstoken` / `instanceurl` / `tenantid` call metadata every Pub/Sub RPC requires. `ClientCredentialsAuthenticator` overrides `_token_url` because that flow is only served from an org's My Domain host, and validates `domain` up front rather than letting a malformed URL surface as a 404.
+- `replay.py` — client-side replay position tracking, ported from `aiosfstream.replay`. **The port is not mechanical**: the Streaming API had an ordered integer replay id plus a message creation date, which let it discard replayed messages by comparing dates. Pub/Sub replay ids are opaque `bytes` — not ordered, not comparable — and no creation date exists outside the Avro payload, so `ReplayMarker`, `get_message_date` and the staleness check have no counterpart. Markers are stored unconditionally; the `Subscribe` stream itself guarantees ordering. `get_fetch_position()` is the seam the client uses: a stored marker becomes `(CUSTOM, marker)`, otherwise `(default_option, b"")`. `DefaultMappingStorage` is gone — its role collapses into `MappingStorage(mapping, default_option=...)`. `SalesforcePubSubClient.connect` is an alias of `open()`, kept for the original 0.1.0 surface.
+- `client.py` — `SalesforcePubSubClient` owns the `grpc.aio` channel and the schema cache, plus the two subscription paths described below.
+- `pubsub_api_pb2.py` / `pubsub_api_pb2_grpc.py` — generated code, do not hand-edit except as noted below.
+
+### The two replay strategies
+
+Both are supported, and they are deliberately separate entry points because managed subscriptions are addressed by `subscription_id` / `developer_name` rather than by topic name:
+
+- `subscribe(topic_name)` — position tracked **client side** in `client.replay_storage`. Configure with the `replay` constructor argument (a `ReplayOption`, any `MutableMapping[str, bytes]`, or a custom `ReplayMarkerStorage`).
+- `managed_subscribe(...)` — returns a `ManagedSubscription`, with the position tracked **server side** by Salesforce via `CommitReplayRequest`. Requires a Managed Event Subscription configured in the org, so it can only be exercised against mocks in tests.
+
+`ReplayMarkerStoragePolicy` governs both: `AUTOMATIC` advances the position as each event is consumed, `MANUAL` waits for `commit_replay()` (client side) or `ManagedSubscription.commit()` (managed). The two cost very different things — client-side `AUTOMATIC` is a local mapping write, managed `AUTOMATIC` queues a `CommitReplayRequest` per event onto the request stream. That asymmetry is inherent to the managed path; batching commits would change delivery semantics, so don't "optimise" it away without deciding that deliberately. One asymmetry worth preserving: a `FetchResponse` keepalive carries no events but a fresh `latest_replay_id`. `AUTOMATIC` advances on it, so an idle subscription doesn't re-read the retention window on reconnect; `MANUAL` must not, since nothing was consumed.
+
+### Flow control and re-authentication
+
+`_subscribe_once()` drives the request stream from an `asyncio.Queue`. The initial `FetchRequest` carries the replay position; afterwards, whenever a response reports `pending_num_requested <= 0`, another `FetchRequest` is enqueued. Because the generator only resumes when the consumer asks for the next event, this is what applies backpressure. Do not "simplify" this back into a single-request generator — the stream stalls after `num_requested` events.
+
+`subscribe()` wraps `_subscribe_once()` in a loop: a gRPC `UNAUTHENTICATED` becomes the internal `_AuthenticationExpired`, the authenticator runs again, and the subscription is re-established from the stored replay marker with the fresh token in `FetchRequest.auth_refresh`. The retry count is bounded by `auth_retries` and reset whenever a resumed subscription delivers an event, so routine hourly expiries never exhaust it but revoked credentials fail fast instead of hammering the token endpoint.
+
+Events are only preserved across a token expiry if a *storing* `ReplayMarkerStorage` holds a marker. Two ways that silently fails: `ConstantReplayId` never stores, so it restarts from its option; and under `MANUAL` with nothing committed yet the marker is `None`, so the resumed stream restarts from `default_option` and drops everything between subscribe and expiry.
+
+### Regenerating the protobuf stubs
+
+The `.proto` is **not** vendored here; it must come from Salesforce's upstream `developerforce/pub-sub-api` repository.
+
+```bash
+venv/bin/python -m grpc_tools.protoc -I<proto_dir> \
+  --python_out=simple_salesforce_pubsub --grpc_python_out=simple_salesforce_pubsub \
+  pubsub_api.proto
+```
+
+`protoc` emits `import pubsub_api_pb2 as pubsub__api__pb2` at the top of `pubsub_api_pb2_grpc.py`, which breaks inside a package. The checked-in file has been patched to `from . import pubsub_api_pb2 as pubsub__api__pb2` — **re-apply that patch after every regeneration.**
+
+## Remaining gaps
+
+- **No `unsubscribe` / multiplexing.** Each `subscribe()` call opens its own gRPC stream. `aiosfstream` multiplexed every channel over one connection and could drop individual subscriptions.
+- **`PublishStream` is unwired.** Only the unary `Publish` is used, so publishing pays a round trip per batch.
+- **No `replay_fallback`.** `aiosfstream` retried a subscription with a fallback option when a replay id fell outside the retention window. The proto's `ErrorCode` enum is only `{UNKNOWN, PUBLISH, COMMIT}`, so there is no error code to match on — recognising that case means inspecting the gRPC status details.
+- **Not adopted from the sibling project:** ruff, coverage, `py.typed`, uv, Sphinx docs. See "Conventions" above.
+- **Not a git repository.** There is no rollback point for changes made here.

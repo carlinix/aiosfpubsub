@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-salesforce-pubsub"
+version = "0.1.0"
+description = "Salesforce Pub/Sub API client using gRPC and asyncio, replacing aiosfstream"
+authors = [
+    { name="Ricardo Sperandio" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.83.1",
+    "aiohttp>=3.8.0",
+    "protobuf>=7.35.1",
+    "fastavro>=1.7.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.83.1",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0"
+]
+
+[tool.setuptools]
+packages = ["simple_salesforce_pubsub"]
+
+[tool.pytest.ini_options]
+minversion = "8.4"
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "-ra",
+]
+asyncio_mode = "strict"
+testpaths = ["tests"]

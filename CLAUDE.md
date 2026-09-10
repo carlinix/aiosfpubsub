@@ -2,6 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow
+
+**Never commit to `main`.** Branch first, always — including for a one-line
+docs fix. `main` tracks `origin/main` and only moves through a merged pull
+request. If work has already landed on `main` locally, move it: branch at the
+current tip, then `git reset --hard origin/main`.
+
+Name branches `<type>/<subject>` with the same types the commit convention
+uses (`feat/jwt-bearer-authenticator`, `docs/workflow-conventions`). One
+branch per concern; when two features touch the same files, stack the second
+on the first and say so in its PR description rather than mixing them.
+
+**Everything in this repository is written in English** — code, comments,
+docstrings, documentation, tests, commit messages, branch names, and pull
+request titles and descriptions. This holds regardless of the language the
+work is being discussed in.
+
 ## Environment & Commands
 
 The project is managed with `uv`, which owns `.venv`. A stale `venv/` from
@@ -128,7 +145,7 @@ The proto is explicit that N `CommitReplayRequest`s can be batched into a single
 ## Remaining gaps
 
 - **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
-- **The repository has no remote.** `project.urls` points at `github.com/carlinix/aiosfpubsub`, which does not exist yet (the name was free as of 2026-09-10), and `ci.yml` triggers on `main` where the sibling uses `develop`. `twine check --strict` passing says nothing about whether those URLs resolve.
+- **`ci.yml` triggers on `main` where the sibling uses `develop`.** The remote now exists — `github.com/carlinix/aiosfpubsub`, created 2026-09-10, which is what `project.urls` points at — and CI runs there green on all nine jobs, so the branch name is the one piece of the sibling's shape this repo deliberately does not copy. Whether to adopt `develop` is still undecided.
 - **The distribution name is taken on PyPI.** `aiosfpubsub` belongs to `bensnyde/aiosfpubsub`, last released 2024-06-29 (0.0.6, 5 releases in one week, 0 stars, Unlicense). **`uv publish` will be rejected.** The plan is a voluntary transfer request to the author; the formal PEP 541 route is a poor fit, since this project is not a fork of that one, alternative names are available, and it has no users yet — three of the five things a requester must demonstrate. If the transfer does not come through, the fallback names verified free on 2026-09-10 are `aiosfeventbus` and `sfpubsub`. Do not publish under a substitute name without asking.
 - **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.
 - **`publish_stream()` does not enforce the 70 second liveness rule.** The proto requires a publish request with at least one event every 70 seconds to hold the stream open; a slow `batches` iterable silently loses it.

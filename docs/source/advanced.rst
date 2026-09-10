@@ -124,11 +124,19 @@ queued on. The acknowledgements arrive in
 :obj:`ManagedSubscription.commit_responses`, keyed by the request id
 :meth:`~ManagedSubscription.commit` returned.
 
+.. note::
+
+    Acknowledgements are not one to one. The server may batch several commits
+    and answer once, naming only the last of them, which acknowledges every
+    commit submitted before it as well. A commit whose response carries an
+    error is left pending, since ``ErrorCode.COMMIT`` marks an unrecoverable
+    commit failure.
+
 Replay fallback
 ~~~~~~~~~~~~~~~
 
-A stored replay id eventually falls outside the retention window, and the
-server then rejects the subscription. Give a ``replay_fallback`` to have the
+A stored replay id eventually falls outside the 72 hour retention window, and
+the server then rejects the subscription. Give a ``replay_fallback`` to have the
 unusable position discarded and the subscription retried once from a replay
 option instead of raising:
 
@@ -144,12 +152,19 @@ It can also be given per subscription::
 
 .. warning::
 
-    The Pub/Sub API has no error code for this condition. Its ``ErrorCode``
-    enum covers only publish and commit failures, so the rejection is
-    recognised from the gRPC status instead, by
-    :meth:`~SalesforcePubSubClient.is_replay_id_error`. It is a static method
-    so that you can override it in a subclass if the server's wording
-    changes. If replay fallback stops triggering, look there first.
+    The Pub/Sub API's ``ErrorCode`` enum covers only publish and commit
+    failures, so there is no protocol code for this condition. Salesforce
+    reports it as an ``INVALID_ARGUMENT`` status carrying
+    ``sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted`` in
+    the ``error-code`` trailing metadata, which
+    :meth:`~SalesforcePubSubClient.is_replay_id_error` checks, falling back to
+    the status description. It is a static method so that you can override it
+    in a subclass if Salesforce changes either. If replay fallback stops
+    triggering, look there first.
+
+Managed subscriptions need no fallback: if a committed replay id is invalid,
+retrying restarts the subscription from the ``errorRecoveryReplay`` value
+configured on the ``ManagedEventSubscription`` record in your org.
 
 Flow control
 ------------
@@ -234,6 +249,13 @@ yields the server's response for each batch:
 
     async for response in client.publish_stream(topic, batches()):
         print(response.results)
+
+.. warning::
+
+    The server closes a publish stream unless it receives a request with at
+    least one event every 70 seconds. Keeping the stream alive is the caller's
+    responsibility: yield often enough, or use
+    :meth:`~SalesforcePubSubClient.publish` for sporadic traffic.
 
 Rejected records do not raise here: tearing the stream down over one bad batch
 would defeat the point of keeping it open. Inspect each response, or pass one

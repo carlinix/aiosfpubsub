@@ -47,8 +47,13 @@ class AuthenticatorStub(AuthenticatorBase):
 
 
 class RpcErrorStub(grpc.aio.AioRpcError):
-    def __init__(self, code, details="boom"):
-        super().__init__(code, MagicMock(), MagicMock(), details=details)
+    def __init__(self, code, details="boom", trailers=()):
+        super().__init__(
+            code,
+            MagicMock(),
+            grpc.aio.Metadata(*trailers),
+            details=details,
+        )
 
 
 def consumer_event(replay_id, event_id="evt"):
@@ -280,7 +285,6 @@ async def test_subscribe_reauthenticates_and_resumes(client):
     # the resumed stream picks up after the last stored marker
     assert resumed.requests[0].replay_preset == pb2.CUSTOM
     assert resumed.requests[0].replay_id == b"\x01"
-    assert resumed.requests[0].auth_refresh == "token-1"
 
 
 @pytest.mark.asyncio
@@ -540,12 +544,38 @@ async def test_resume_without_a_storing_storage(client):
     assert resumed.requests[0].replay_id == b"\x03"
 
 
-def test_is_replay_id_error_recognises_the_status():
+def test_is_replay_id_error_reads_the_salesforce_trailer():
+    """Salesforce reports its own code in the error-code trailing metadata"""
+    assert SalesforcePubSubClient.is_replay_id_error(
+        RpcErrorStub(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "an opaque description",
+            trailers=(
+                (
+                    "error-code",
+                    "sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted",
+                ),
+            ),
+        )
+    )
+
+
+def test_is_replay_id_error_falls_back_to_the_description():
     assert SalesforcePubSubClient.is_replay_id_error(
         RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Replay ID is invalid")
     )
+
+
+def test_is_replay_id_error_ignores_other_failures():
     assert not SalesforcePubSubClient.is_replay_id_error(
         RpcErrorStub(grpc.StatusCode.INVALID_ARGUMENT, "Topic does not exist")
+    )
+    assert not SalesforcePubSubClient.is_replay_id_error(
+        RpcErrorStub(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "Topic does not exist",
+            trailers=(("error-code", "sfdc.platform.eventbus.grpc.topic.notfound"),),
+        )
     )
     assert not SalesforcePubSubClient.is_replay_id_error(
         RpcErrorStub(grpc.StatusCode.PERMISSION_DENIED, "replay")
@@ -998,7 +1028,6 @@ async def test_managed_subscribe_reauthenticates_and_resumes(client):
 
     assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
     assert client.authenticator.authenticate_calls == 1
-    assert resumed.requests[0].auth_refresh == "token-1"
     assert resumed.requests[0].developer_name == "sub"
 
 
@@ -1111,13 +1140,12 @@ async def test_publish_stream_does_not_raise_on_rejected_records(client):
 async def test_managed_commits_are_acknowledged_and_cleared(client):
     client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
     subscription = client.managed_subscribe(developer_name="sub")
-    commit_request_id = "fixed-id"
-    subscription.pending_commits[commit_request_id] = b"\x01"
+    subscription.pending_commits["fixed-id"] = b"\x01"
     client.stub.ManagedSubscribe = CallStub(
         [
             pb2.ManagedFetchResponse(
                 commit_response=pb2.CommitReplayResponse(
-                    commit_request_id=commit_request_id, replay_id=b"\x01"
+                    commit_request_id="fixed-id", replay_id=b"\x01"
                 )
             )
         ]
@@ -1127,4 +1155,73 @@ async def test_managed_commits_are_acknowledged_and_cleared(client):
         pass
 
     assert subscription.pending_commits == {}
-    assert subscription.commit_responses[commit_request_id].replay_id == b"\x01"
+    assert subscription.commit_responses["fixed-id"].replay_id == b"\x01"
+
+
+@pytest.mark.asyncio
+async def test_one_acknowledgement_clears_the_commits_it_batched(client):
+    """The server answers a batch of commits once, naming only the last
+
+    Clearing just the named id would leak every earlier commit, growing
+    pending_commits without bound and resending them on every restart.
+    """
+    subscription = client.managed_subscribe(developer_name="sub")
+    subscription.pending_commits.update(
+        {"first": b"\x01", "second": b"\x02", "third": b"\x03"}
+    )
+    client.stub.ManagedSubscribe = CallStub(
+        [
+            pb2.ManagedFetchResponse(
+                commit_response=pb2.CommitReplayResponse(
+                    commit_request_id="second", replay_id=b"\x02"
+                )
+            )
+        ]
+    )
+
+    async for _ in subscription:  # pragma: no cover - no events
+        pass
+
+    # "third" was submitted after the acknowledged commit, so it still stands
+    assert subscription.pending_commits == {"third": b"\x03"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_commit_clears_nothing(client):
+    """ErrorCode.COMMIT is unrecoverable, so the position stays queued"""
+    subscription = client.managed_subscribe(developer_name="sub")
+    subscription.pending_commits["first"] = b"\x01"
+    client.stub.ManagedSubscribe = CallStub(
+        [
+            pb2.ManagedFetchResponse(
+                commit_response=pb2.CommitReplayResponse(
+                    commit_request_id="first",
+                    error=pb2.Error(code=pb2.COMMIT, msg="unrecoverable"),
+                )
+            )
+        ]
+    )
+
+    async for _ in subscription:  # pragma: no cover - no events
+        pass
+
+    assert subscription.pending_commits == {"first": b"\x01"}
+    assert subscription.commit_responses["first"].error.msg == "unrecoverable"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_acknowledgement_clears_nothing(client):
+    subscription = client.managed_subscribe(developer_name="sub")
+    subscription.pending_commits["first"] = b"\x01"
+    client.stub.ManagedSubscribe = CallStub(
+        [
+            pb2.ManagedFetchResponse(
+                commit_response=pb2.CommitReplayResponse(commit_request_id="other")
+            )
+        ]
+    )
+
+    async for _ in subscription:  # pragma: no cover - no events
+        pass
+
+    assert subscription.pending_commits == {"first": b"\x01"}

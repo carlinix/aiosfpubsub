@@ -75,7 +75,9 @@ Both are supported, and they are deliberately separate entry points because mana
 
 `_subscribe_once()` drives the request stream from an `asyncio.Queue`. The initial `FetchRequest` carries the replay position; afterwards, whenever a response reports `pending_num_requested <= 0`, another `FetchRequest` is enqueued. Because the generator only resumes when the consumer asks for the next event, this is what applies backpressure. Do not "simplify" this back into a single-request generator — the stream stalls after `num_requested` events.
 
-`subscribe()` wraps `_subscribe_once()` in a loop: a gRPC `UNAUTHENTICATED` becomes the internal `_AuthenticationExpired`, the authenticator runs again, and the subscription is re-established from the stored replay marker with the fresh token in `FetchRequest.auth_refresh`. The retry count is bounded by `auth_retries` and reset whenever a resumed subscription delivers an event, so routine hourly expiries never exhaust it but revoked credentials fail fast instead of hammering the token endpoint.
+`num_requested` is a credit, not a batch size, and the credits are cumulative: the proto states that requesting more before the server has delivered the outstanding amount makes it *add* to the outstanding total. Replenishing exactly at zero matches Salesforce's own reference Node client. Note the timing rule that comes with it: while `pending_num_requested > 0` the server keeps the stream alive with an empty `FetchResponse` within 270 seconds, but once it reaches zero the client has ~60 seconds to send the next `FetchRequest` or the server closes the stream. A consumer slower than that will lose its stream (see "Remaining gaps").
+
+`subscribe()` wraps `_subscribe_once()` in a loop: a gRPC `UNAUTHENTICATED` becomes the internal `_AuthenticationExpired`, the authenticator runs again, and the subscription is re-established from the stored replay marker — with **fresh call metadata**, which is the only supported way to present a new token. `FetchRequest.auth_refresh` looks like it exists for this and does not: the proto marks it "For internal Salesforce use only" in all three messages that carry it. Do not wire it up. The retry count is bounded by `auth_retries` and reset whenever a resumed subscription delivers an event, so routine hourly expiries never exhaust it but revoked credentials fail fast instead of hammering the token endpoint.
 
 `_ResumePosition` decides where the re-established stream starts, and exists because the replay storage is legitimately empty in two cases — `ConstantReplayId` never stores, and `MANUAL` stores nothing until the consumer commits. Recomputing `get_fetch_position()` there would restart from the default option and drop everything published in between. The resolution order is: the stored marker, then an in-memory position advanced under `AUTOMATIC` (which covers `ConstantReplayId`), then the position the subscription originally started from. A `NEW_EVENTS` subscription additionally *anchors* itself: the first keepalive received before any event names a concrete replay id, which replaces the `LATEST` preset so a resume is exact rather than "from now" again.
 
@@ -83,7 +85,7 @@ One residual limitation, asserted in `test_manual_policy_without_a_marker_cannot
 
 ### Regenerating the protobuf stubs
 
-The `.proto` is **not** vendored here; it must come from Salesforce's upstream `developerforce/pub-sub-api` repository.
+The `.proto` is **not** vendored here; it must come from Salesforce's upstream `forcedotcom/pub-sub-api` repository (the older `developerforce` name still redirects).
 
 ```bash
 uv sync --group proto
@@ -96,7 +98,13 @@ uv run python -m grpc_tools.protoc -I<proto_dir> \
 
 ### replay_fallback is a heuristic
 
-`replay_fallback` mirrors `aiosfstream`: when the server rejects the replay id the subscription started from — typically because it aged out of the retention window — the marker is discarded and the subscription is retried once from the fallback option. Unlike the Streaming API there is no error code for this; the proto's `ErrorCode` covers only `{UNKNOWN, PUBLISH, COMMIT}`, both publish-side. So `is_replay_id_error()` matches on the gRPC status instead (`INVALID_ARGUMENT` whose details mention "replay") and is a `staticmethod` precisely so it can be overridden when Salesforce changes the wording. **If replay fallback stops triggering, look there first.**
+`replay_fallback` mirrors `aiosfstream`: when the server rejects the replay id the subscription started from — typically because it aged out of the **72 hour** retention window — the marker is discarded and the subscription is retried once from the fallback option. The proto's `ErrorCode` covers only `{UNKNOWN, PUBLISH, COMMIT}`, both publish-side, so there is no protocol error code for this. Salesforce reports it as an `INVALID_ARGUMENT` status carrying its own code in the **trailing metadata**, under `error-code`: `sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted`. `is_replay_id_error()` checks that trailer first and falls back to matching "replay" in the status description, and is a `staticmethod` so it can be overridden. **If replay fallback stops triggering, look there first.**
+
+The managed path needs no equivalent: when a committed replay id is invalid, retrying `ManagedSubscribe` restarts from the `errorRecoveryReplay` field configured on the org's `ManagedEventSubscription` record.
+
+### Commit acknowledgements are not one-to-one
+
+The proto is explicit that N `CommitReplayRequest`s can be batched into a single `CommitReplayResponse` naming only the **last** one. `_record_commit_response()` therefore clears every pending commit up to and including the acknowledged id — insertion order in `pending_commits` is submission order. Clearing only the named id leaks the rest, growing the mapping without bound and resending them on every restart. Two cases clear nothing: a response with an `error` set (`ErrorCode.COMMIT` is documented as unrecoverable, so dropping the position would be worse), and an acknowledgement for an id this subscription never submitted.
 
 ### Publish failures are per record
 
@@ -109,3 +117,7 @@ uv run python -m grpc_tools.protoc -I<proto_dir> \
 - **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
 - **The repository has no remote.** `project.urls` points at `github.com/carlinix/simple-salesforce-pubsub`, which does not exist yet, and `ci.yml` triggers on `main` where the sibling uses `develop`. `twine check --strict` passing says nothing about whether those URLs resolve.
 - **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.
+- **A server-closed stream ends the iteration silently.** If the server closes a `Subscribe` stream — the ~60 second replenishment window elapsing is the likely cause — the generator simply returns and the consumer's `async for` finishes as though the subscription completed normally. Salesforce's guidance is to call `Subscribe` again; the client does not. Re-establishing would change when `subscribe()` ever returns, so it needs a deliberate decision.
+- **No retry backoff.** Salesforce recommends exponential backoff with a bounded attempt count for long-lived RPCs. `auth_retries` bounds the attempts but retries immediately.
+- **`publish_stream()` does not enforce the 70 second liveness rule.** The proto requires a publish request with at least one event every 70 seconds to hold the stream open; a slow `batches` iterable silently loses it.
+- **`ProducerEvent.id` is never set.** The proto allows a user-provided id, and `PublishResult.correlation_key` is what correlates a result back to its record. `publish()` sends records only, so results can only be matched positionally.

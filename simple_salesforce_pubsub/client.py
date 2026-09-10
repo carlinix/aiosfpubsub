@@ -34,6 +34,10 @@ from .replay import (
 DEFAULT_ENDPOINT = "api.pubsub.salesforce.com:7443"
 DEFAULT_NUM_REQUESTED = 10
 DEFAULT_AUTH_RETRIES = 3
+#: Trailing metadata key carrying the Salesforce error code of a failed RPC
+REPLAY_ERROR_TRAILER = "error-code"
+#: Error code prefix Salesforce reports for a replay id it will not accept
+REPLAY_ID_ERROR_CODE = "sfdc.platform.eventbus.grpc.subscription.fetch.replayid"
 LOGGER = logging.getLogger(__name__)
 
 #: A decoded event, as yielded by the subscription iterators
@@ -374,10 +378,10 @@ class SalesforcePubSubClient:
 
         If the server rejects the call metadata because the access token
         expired, the authenticator is invoked again and the subscription is
-        re-established. It resumes from the stored replay marker, or, when the
-        storage holds none, from the position the subscription originally
-        started at, so events are not dropped by a policy or a storage which
-        has nothing recorded yet.
+        re-established with fresh call metadata. It resumes from the stored
+        replay marker, or, when the storage holds none, from the position the
+        subscription originally started at, so events are not dropped by a
+        policy or a storage which has nothing recorded yet.
 
         Iteration ends when :meth:`unsubscribe` is called for *topic_name*, or
         when the client is closed.
@@ -408,7 +412,6 @@ class SalesforcePubSubClient:
         )
         slot = _StreamSlot()
         self._streams[topic_name] = slot
-        auth_refresh = ""
         attempts = 0
         fallback_used = False
         try:
@@ -416,7 +419,7 @@ class SalesforcePubSubClient:
                 delivered = False
                 try:
                     async for event in self._subscribe_once(
-                        topic_name, budget, auth_refresh, state, slot
+                        topic_name, budget, state, slot
                     ):
                         delivered = True
                         yield event
@@ -438,7 +441,6 @@ class SalesforcePubSubClient:
                         topic_name,
                     )
                     await self.authenticator.authenticate()
-                    auth_refresh = self.authenticator.access_token or ""
                 except _ReplayIdRejected as error:
                     if fallback is None or fallback_used:
                         raise ClientError(
@@ -462,7 +464,6 @@ class SalesforcePubSubClient:
         self,
         topic_name: str,
         num_requested: int,
-        auth_refresh: str,
         state: _ResumePosition,
         slot: _StreamSlot,
     ) -> AsyncGenerator[Event, None]:
@@ -484,7 +485,6 @@ class SalesforcePubSubClient:
                 replay_preset=replay_preset,
                 replay_id=replay_id,
                 num_requested=num_requested,
-                auth_refresh=auth_refresh,
             )
             while True:
                 yield await requests.get()
@@ -535,17 +535,27 @@ class SalesforcePubSubClient:
     def is_replay_id_error(error: grpc.aio.AioRpcError) -> bool:
         """Return whether *error* means the replay id was rejected
 
-        The usual cause is a replay id that has fallen outside the event
-        retention window. Unlike the Streaming API, the Pub/Sub API has no
-        error code for this: the ``ErrorCode`` enum of the protocol only
-        covers publish and commit failures, so the condition has to be
-        recognised from the gRPC status. Override this in a subclass if the
-        server wording changes.
+        The usual cause is a replay id that has fallen outside the 72 hour
+        event retention window. Unlike the Streaming API, the Pub/Sub API has
+        no error code for this in the protocol: its ``ErrorCode`` enum covers
+        only publish and commit failures. Salesforce reports it as an
+        ``INVALID_ARGUMENT`` status carrying its own code in the trailing
+        metadata, under ``error-code``:
+        ``sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted``.
 
-        :param error: The error raised by the ``Subscribe`` stream
+        Both the trailer and the status description are checked, since the
+        description is human readable text that can change. Override this in a
+        subclass if Salesforce changes either.
+
+        :param error: The error raised by the subscription stream
         """
         if error.code() is not grpc.StatusCode.INVALID_ARGUMENT:
             return False
+        for key, value in error.trailing_metadata() or ():
+            if key == REPLAY_ERROR_TRAILER and str(value).startswith(
+                REPLAY_ID_ERROR_CODE
+            ):
+                return True
         return "replay" in (error.details() or "").lower()
 
     def unsubscribe(self, name: str) -> bool:
@@ -807,10 +817,10 @@ class ManagedSubscription:
 
         As with :meth:`SalesforcePubSubClient.subscribe`, an access token
         rejected by the server triggers a re-authentication and the stream is
-        re-established, bounded by the client's ``auth_retries``. No replay
-        position has to be recovered: Salesforce holds it, which is the point
-        of a managed subscription. Commits queued but not yet sent survive the
-        restart.
+        re-established with fresh call metadata, bounded by the client's
+        ``auth_retries``. No replay position has to be recovered: Salesforce
+        holds it, which is the point of a managed subscription. Commits queued
+        but not yet acknowledged survive the restart.
 
         :raise ClientInvalidOperation: If the client is not open, or if a \
         subscription is already registered under this one's :obj:`name`
@@ -826,13 +836,12 @@ class ManagedSubscription:
                 f"Already subscribed to {self.name!r}. Call unsubscribe() first."
             )
         client._streams[self.name] = self._slot
-        auth_refresh = ""
         attempts = 0
         try:
             while True:
                 delivered = False
                 try:
-                    async for event in self._iterate_once(auth_refresh):
+                    async for event in self._iterate_once():
                         delivered = True
                         yield event
                     return
@@ -851,11 +860,46 @@ class ManagedSubscription:
                         self.name,
                     )
                     await client.authenticator.authenticate()
-                    auth_refresh = client.authenticator.access_token or ""
                     self._requeue_pending_commits()
         finally:
             if client._streams.get(self.name) is self._slot:
                 del client._streams[self.name]
+
+    def _record_commit_response(self, response: pb2.CommitReplayResponse) -> None:
+        """Store a commit acknowledgement and clear what it covers
+
+        The server does not answer one commit per request: it may batch
+        several and reply once, with the request id of the *last* commit in
+        the batch. Every commit submitted before that one is therefore
+        acknowledged too, and clearing only the named id would leak the rest,
+        growing :obj:`pending_commits` without bound and resending them on
+        every restart. Submission order is the insertion order of the
+        mapping, so everything up to and including the named id is cleared.
+
+        A failed commit clears nothing. ``ErrorCode.COMMIT`` marks an
+        unrecoverable commit error, and dropping the position on that would
+        be worse than keeping it queued. Neither does an acknowledgement for
+        a commit this subscription doesn't know about, which would otherwise
+        drain everything still queued.
+
+        :param response: A commit acknowledgement from the server
+        """
+        self.commit_responses[response.commit_request_id] = response
+        if response.HasField("error"):
+            LOGGER.warning(
+                "Commit %r of %r failed: %s: %s",
+                response.commit_request_id,
+                self.name,
+                pb2.ErrorCode.Name(response.error.code),
+                response.error.msg,
+            )
+            return
+        submitted = list(self.pending_commits)
+        if response.commit_request_id not in submitted:
+            return
+        covered = submitted[: submitted.index(response.commit_request_id) + 1]
+        for commit_request_id in covered:
+            del self.pending_commits[commit_request_id]
 
     def _requeue_pending_commits(self) -> None:
         """Move the unacknowledged commits onto a fresh request queue
@@ -872,7 +916,7 @@ class ManagedSubscription:
                 self._commit_request(commit_request_id, replay_id)
             )
 
-    async def _iterate_once(self, auth_refresh: str) -> AsyncGenerator[Event, None]:
+    async def _iterate_once(self) -> AsyncGenerator[Event, None]:
         """Run a single ``ManagedSubscribe`` stream until it ends or fails
 
         :raise _AuthenticationExpired: If the server rejects the call metadata
@@ -888,7 +932,6 @@ class ManagedSubscription:
                 subscription_id=self.subscription_id,
                 developer_name=self.developer_name,
                 num_requested=num_requested,
-                auth_refresh=auth_refresh,
             )
             while True:
                 yield await self._requests.get()
@@ -901,11 +944,7 @@ class ManagedSubscription:
         try:
             async for response in call:
                 if response.HasField("commit_response"):
-                    commit_response = response.commit_response
-                    self.commit_responses[commit_response.commit_request_id] = (
-                        commit_response
-                    )
-                    self.pending_commits.pop(commit_response.commit_request_id, None)
+                    self._record_commit_response(response.commit_response)
                 for consumer_event in response.events:
                     yield await client._decode_event(consumer_event)
                     if automatic:

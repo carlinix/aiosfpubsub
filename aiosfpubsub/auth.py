@@ -74,11 +74,7 @@ class AuthenticatorBase(ABC):
             raise AuthenticationError("Network request failed") from error
 
         if status_code != HTTPStatus.OK:
-            self.access_token = None
-            self.token_type = None
-            self.instance_url = None
-            self.id = None
-            self.tenant_id = None
+            self._clear_credentials()
             raise AuthenticationError("Authentication failed", response_data)
 
         self.access_token = response_data.get("access_token")
@@ -86,6 +82,18 @@ class AuthenticatorBase(ABC):
         self.instance_url = response_data.get("instance_url")
         self.id = response_data.get("id")
         self.tenant_id = self.get_tenant_id(self.id)
+
+    def _clear_credentials(self) -> None:
+        """Discard the values obtained from a previous authentication
+
+        Called when an authentication attempt fails, so that a stale session
+        can't outlive it and keep being presented as call metadata.
+        """
+        self.access_token = None
+        self.token_type = None
+        self.instance_url = None
+        self.id = None
+        self.tenant_id = None
 
     @staticmethod
     def get_tenant_id(identity_url: str | None) -> str | None:

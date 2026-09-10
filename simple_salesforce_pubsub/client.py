@@ -20,6 +20,7 @@ from .exceptions import (
     AuthenticationError,
     ClientError,
     ClientInvalidOperation,
+    PublishError,
     SchemaError,
 )
 from .replay import (
@@ -607,14 +608,28 @@ class SalesforcePubSubClient:
         )
 
     async def publish(
-        self, topic_name: str, records: list[dict[str, Any]]
+        self,
+        topic_name: str,
+        records: list[dict[str, Any]],
+        *,
+        raise_on_error: bool = True,
     ) -> pb2.PublishResponse:
         """Publish *records* to *topic_name*
 
+        A publish request can half succeed, with the server reporting a
+        result per record. By default a rejected record raises, with the whole
+        response reachable on the exception so the accepted records' replay
+        ids are not lost.
+
         :param topic_name: Name of the topic to publish to
         :param records: Event records, encoded with the topic's Avro schema
+        :param raise_on_error: Whether a rejected record raises \
+        :obj:`~.PublishError` instead of being left for the caller to find \
+        in the response
         :raise ClientInvalidOperation: If the client is not open
         :raise ClientError: If the publish request gets rejected by the server
+        :raise PublishError: If a record was rejected and *raise_on_error* \
+        is set
         :raise SchemaError: If the topic's schema can't be fetched or parsed
         """
         stub = self._get_stub()
@@ -630,9 +645,30 @@ class SalesforcePubSubClient:
         ]
         request = pb2.PublishRequest(topic_name=topic_name, events=events)
         try:
-            return await stub.Publish(request, metadata=self._get_metadata())
+            response = await stub.Publish(request, metadata=self._get_metadata())
         except grpc.aio.AioRpcError as error:
             raise ClientError(f"Publish failed: {error.details()}") from error
+        if raise_on_error:
+            self.raise_for_results(response)
+        return response
+
+    @staticmethod
+    def raise_for_results(response: pb2.PublishResponse) -> None:
+        """Raise if any record of *response* was rejected
+
+        :param response: A publish response
+        :raise PublishError: If at least one result carries an error
+        """
+        rejected = [
+            result.error for result in response.results if result.HasField("error")
+        ]
+        if not rejected:
+            return
+        summary = "; ".join(f"{pb2.ErrorCode.Name(e.code)}: {e.msg}" for e in rejected)
+        raise PublishError(
+            f"{len(rejected)} of {len(response.results)} records rejected: {summary}",
+            response,
+        )
 
     async def publish_stream(
         self,
@@ -644,6 +680,12 @@ class SalesforcePubSubClient:
         Unlike :meth:`publish`, which pays a round trip per call, this keeps
         one ``PublishStream`` open and yields the server's response for each
         batch as it arrives. The topic's schema is fetched once.
+
+        Rejected records are **not** raised here: tearing the stream down over
+        one bad batch defeats the point of keeping it open. Each yielded
+        response carries its own per-record results, so inspect them, or pass
+        one to :meth:`raise_for_results` to get the same error
+        :meth:`publish` would have raised.
 
         :param topic_name: Name of the topic to publish to
         :param batches: An asynchronous iterable of record batches
@@ -705,6 +747,9 @@ class ManagedSubscription:
         self.name = subscription_id or developer_name
         self._requests: asyncio.Queue[pb2.ManagedFetchRequest] = asyncio.Queue()
         self._slot = _StreamSlot()
+        #: Replay ids of the commits still waiting for an acknowledgement,
+        #: keyed by request id
+        self.pending_commits: dict[str, bytes] = {}
         #: Commit responses received from the server, keyed by request id
         self.commit_responses: dict[str, pb2.CommitReplayResponse] = {}
 
@@ -733,34 +778,109 @@ class ManagedSubscription:
         only delivered while the subscription is being iterated. The server's
         acknowledgement lands in :obj:`commit_responses` under the returned id.
 
+        A commit stays in :obj:`pending_commits` until the server
+        acknowledges it, and is sent again if the stream has to be
+        re-established, so a commit is not lost with the stream it was queued
+        on.
+
         :param replay_id: The ``replay_id`` of the processed event
         :return: The generated ``commit_request_id``
         """
         commit_request_id = str(uuid.uuid4())
-        await self._requests.put(
-            pb2.ManagedFetchRequest(
-                commit_replay_id_request=pb2.CommitReplayRequest(
-                    commit_request_id=commit_request_id, replay_id=replay_id
-                )
+        self.pending_commits[commit_request_id] = replay_id
+        await self._requests.put(self._commit_request(commit_request_id, replay_id))
+        return commit_request_id
+
+    @staticmethod
+    def _commit_request(
+        commit_request_id: str, replay_id: bytes
+    ) -> pb2.ManagedFetchRequest:
+        """Build the request carrying one commit"""
+        return pb2.ManagedFetchRequest(
+            commit_replay_id_request=pb2.CommitReplayRequest(
+                commit_request_id=commit_request_id, replay_id=replay_id
             )
         )
-        return commit_request_id
 
     async def __aiter__(self) -> AsyncGenerator[Event, None]:
         """Iterate over the decoded events of the managed subscription
 
+        As with :meth:`SalesforcePubSubClient.subscribe`, an access token
+        rejected by the server triggers a re-authentication and the stream is
+        re-established, bounded by the client's ``auth_retries``. No replay
+        position has to be recovered: Salesforce holds it, which is the point
+        of a managed subscription. Commits queued but not yet sent survive the
+        restart.
+
         :raise ClientInvalidOperation: If the client is not open, or if a \
         subscription is already registered under this one's :obj:`name`
+        :raise AuthenticationError: If re-authentication fails, or if the \
+        server keeps rejecting the call metadata
         :raise ClientError: If the subscription gets rejected by the server
         :raise SchemaError: If an event's schema can't be fetched or parsed
         """
         client = self.client
-        stub = client._get_stub()
+        client._get_stub()
         if self.name in client._streams:
             raise ClientInvalidOperation(
                 f"Already subscribed to {self.name!r}. Call unsubscribe() first."
             )
         client._streams[self.name] = self._slot
+        auth_refresh = ""
+        attempts = 0
+        try:
+            while True:
+                delivered = False
+                try:
+                    async for event in self._iterate_once(auth_refresh):
+                        delivered = True
+                        yield event
+                    return
+                except _SubscriptionCancelled:
+                    return
+                except _AuthenticationExpired as error:
+                    attempts = 0 if delivered else attempts + 1
+                    if attempts > client.auth_retries:
+                        raise AuthenticationError(
+                            f"The access token was rejected after "
+                            f"{client.auth_retries} consecutive re-authentication "
+                            f"attempts."
+                        ) from error
+                    LOGGER.info(
+                        "Access token rejected, re-authenticating and resuming %r.",
+                        self.name,
+                    )
+                    await client.authenticator.authenticate()
+                    auth_refresh = client.authenticator.access_token or ""
+                    self._requeue_pending_commits()
+        finally:
+            if client._streams.get(self.name) is self._slot:
+                del client._streams[self.name]
+
+    def _requeue_pending_commits(self) -> None:
+        """Move the unacknowledged commits onto a fresh request queue
+
+        The request generator of the stream that died may have already taken
+        a commit off the queue without it ever reaching the server, so the
+        queue is rebuilt from what is still unacknowledged. Flow control
+        requests are dropped on purpose: the new stream's opening request
+        carries ``num_requested`` again.
+        """
+        self._requests = asyncio.Queue()
+        for commit_request_id, replay_id in self.pending_commits.items():
+            self._requests.put_nowait(
+                self._commit_request(commit_request_id, replay_id)
+            )
+
+    async def _iterate_once(self, auth_refresh: str) -> AsyncGenerator[Event, None]:
+        """Run a single ``ManagedSubscribe`` stream until it ends or fails
+
+        :raise _AuthenticationExpired: If the server rejects the call metadata
+        :raise _SubscriptionCancelled: If the subscription was cancelled \
+        locally
+        """
+        client = self.client
+        stub = client._get_stub()
         num_requested = self.num_requested
 
         async def request_generator() -> AsyncIterator[pb2.ManagedFetchRequest]:
@@ -768,6 +888,7 @@ class ManagedSubscription:
                 subscription_id=self.subscription_id,
                 developer_name=self.developer_name,
                 num_requested=num_requested,
+                auth_refresh=auth_refresh,
             )
             while True:
                 yield await self._requests.get()
@@ -784,6 +905,7 @@ class ManagedSubscription:
                     self.commit_responses[commit_response.commit_request_id] = (
                         commit_response
                     )
+                    self.pending_commits.pop(commit_response.commit_request_id, None)
                 for consumer_event in response.events:
                     yield await client._decode_event(consumer_event)
                     if automatic:
@@ -793,9 +915,9 @@ class ManagedSubscription:
                         pb2.ManagedFetchRequest(num_requested=num_requested)
                     )
         except grpc.aio.AioRpcError as error:
-            if error.code() is grpc.StatusCode.CANCELLED:
-                return
+            code = error.code()
+            if code is grpc.StatusCode.CANCELLED:
+                raise _SubscriptionCancelled from error
+            if code is grpc.StatusCode.UNAUTHENTICATED:
+                raise _AuthenticationExpired from error
             raise ClientError(f"Managed subscribe failed: {error.details()}") from error
-        finally:
-            if client._streams.get(self.name) is self._slot:
-                del client._streams[self.name]

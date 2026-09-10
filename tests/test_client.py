@@ -18,6 +18,7 @@ from simple_salesforce_pubsub.exceptions import (
     AuthenticationError,
     ClientError,
     ClientInvalidOperation,
+    PublishError,
     SchemaError,
 )
 from simple_salesforce_pubsub.replay import MappingStorage, ReplayOption
@@ -982,3 +983,148 @@ def test_stream_slot_cancel_before_a_stream_is_open():
     slot.call = MagicMock()
     slot.cancel()
     slot.call.cancel.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_reauthenticates_and_resumes(client):
+    expired = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([pb2.ManagedFetchResponse(events=[consumer_event(b"\x02")])])
+    client.stub.ManagedSubscribe = call_sequence(expired, resumed)
+
+    events = [event async for event in client.managed_subscribe(developer_name="sub")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
+    assert client.authenticator.authenticate_calls == 1
+    assert resumed.requests[0].auth_refresh == "token-1"
+    assert resumed.requests[0].developer_name == "sub"
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_gives_up_after_repeated_auth_failures(client):
+    client.auth_retries = 1
+    client.stub.ManagedSubscribe = lambda *args, **kwargs: CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
+    )(*args, **kwargs)
+
+    with pytest.raises(AuthenticationError, match="1 consecutive"):
+        async for _ in client.managed_subscribe(developer_name="sub"):
+            pass  # pragma: no cover
+
+    assert client.authenticator.authenticate_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_keeps_queued_commits_across_a_restart(client):
+    expired = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])],
+        error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED),
+    )
+    resumed = CallStub([])
+    client.stub.ManagedSubscribe = call_sequence(expired, resumed)
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+
+    subscription = client.managed_subscribe(developer_name="sub")
+    async for event in subscription:
+        await subscription.commit(event["replay_id"])
+
+    # the commit was queued on the stream that died, and rides the new one
+    assert resumed.requests[1].commit_replay_id_request.replay_id == b"\x01"
+
+
+@pytest.mark.asyncio
+async def test_publish_raises_on_a_rejected_record(client):
+    client.stub.GetTopic = AsyncMock(
+        return_value=pb2.TopicInfo(topic_name="/event/X__e", schema_id="schema-1")
+    )
+    client.stub.Publish = AsyncMock(
+        return_value=pb2.PublishResponse(
+            results=[
+                pb2.PublishResult(replay_id=b"\x01"),
+                pb2.PublishResult(
+                    error=pb2.Error(code=pb2.PUBLISH, msg="storage limit")
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(PublishError, match="1 of 2 records rejected") as raised:
+        await client.publish("/event/X__e", [{}, {}])
+
+    # the accepted record's replay id must survive the failure
+    assert raised.value.response.results[0].replay_id == b"\x01"
+    assert [error.msg for error in raised.value.errors] == ["storage limit"]
+    assert "PUBLISH: storage limit" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_publish_can_leave_rejected_records_to_the_caller(client):
+    client.stub.GetTopic = AsyncMock(
+        return_value=pb2.TopicInfo(topic_name="/event/X__e", schema_id="schema-1")
+    )
+    client.stub.Publish = AsyncMock(
+        return_value=pb2.PublishResponse(
+            results=[pb2.PublishResult(error=pb2.Error(code=pb2.PUBLISH, msg="nope"))]
+        )
+    )
+
+    response = await client.publish("/event/X__e", [{}], raise_on_error=False)
+
+    assert response.results[0].error.msg == "nope"
+
+
+def test_raise_for_results_accepts_a_clean_response():
+    response = pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x01")])
+
+    assert SalesforcePubSubClient.raise_for_results(response) is None
+
+
+@pytest.mark.asyncio
+async def test_publish_stream_does_not_raise_on_rejected_records(client):
+    client.stub.GetTopic = AsyncMock(
+        return_value=pb2.TopicInfo(topic_name="/event/X__e", schema_id="schema-1")
+    )
+    rejected = pb2.PublishResponse(
+        results=[pb2.PublishResult(error=pb2.Error(code=pb2.PUBLISH, msg="nope"))]
+    )
+    client.stub.PublishStream = CallStub(
+        [rejected, pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x02")])]
+    )
+
+    async def batches():
+        yield [{}]
+        yield [{}]
+
+    responses = [
+        response async for response in client.publish_stream("/event/X__e", batches())
+    ]
+
+    # a bad batch must not tear down a stream meant to stay open
+    assert len(responses) == 2
+    with pytest.raises(PublishError):
+        SalesforcePubSubClient.raise_for_results(responses[0])
+
+
+@pytest.mark.asyncio
+async def test_managed_commits_are_acknowledged_and_cleared(client):
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    subscription = client.managed_subscribe(developer_name="sub")
+    commit_request_id = "fixed-id"
+    subscription.pending_commits[commit_request_id] = b"\x01"
+    client.stub.ManagedSubscribe = CallStub(
+        [
+            pb2.ManagedFetchResponse(
+                commit_response=pb2.CommitReplayResponse(
+                    commit_request_id=commit_request_id, replay_id=b"\x01"
+                )
+            )
+        ]
+    )
+
+    async for _ in subscription:  # pragma: no cover - no events
+        pass
+
+    assert subscription.pending_commits == {}
+    assert subscription.commit_responses[commit_request_id].replay_id == b"\x01"

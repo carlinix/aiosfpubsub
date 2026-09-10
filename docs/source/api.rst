@@ -34,6 +34,9 @@ Authenticators
 .. autoclass:: JWTBearerAuthenticator
     :members:
 
+.. autoclass:: SOAPAuthenticator
+    :members:
+
 Replay
 ------
 

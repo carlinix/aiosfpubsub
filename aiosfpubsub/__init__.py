@@ -10,6 +10,7 @@ from .auth import (
     JWTBearerAuthenticator,
     PasswordAuthenticator,
     RefreshTokenAuthenticator,
+    SOAPAuthenticator,
 )
 from .cdc import (
     expand_bitmap,
@@ -60,6 +61,7 @@ __all__ = [
     "ReplayMarkerStorage",
     "ReplayMarkerStoragePolicy",
     "ReplayOption",
+    "SOAPAuthenticator",
     "SalesforcePubSubClient",
     "SchemaError",
     "__version__",

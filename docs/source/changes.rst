@@ -22,6 +22,8 @@ First release.
 - Publishing, one request at a time or over a stream, with per-record
   failures reported through :obj:`~aiosfpubsub.PublishError`.
 - ``PasswordAuthenticator``, ``RefreshTokenAuthenticator``,
-  ``ClientCredentialsAuthenticator`` and ``JWTBearerAuthenticator``. The
-  JWT Bearer flow signs its assertion with PyJWT, which comes with the
-  ``jwt`` extra: ``pip install aiosfpubsub[jwt]``.
+  ``ClientCredentialsAuthenticator``, ``JWTBearerAuthenticator`` and
+  ``SOAPAuthenticator``. The JWT Bearer flow signs its assertion with
+  PyJWT, which comes with the ``jwt`` extra:
+  ``pip install aiosfpubsub[jwt]``. The SOAP flow needs no connected app,
+  but Salesforce retires it in Summer '27.

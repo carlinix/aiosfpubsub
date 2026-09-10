@@ -73,7 +73,7 @@ Each event is a mapping:
 Authenticating
 --------------
 
-Four OAuth 2.0 flows are supported.
+Four OAuth 2.0 flows are supported, plus the SOAP API's ``login()`` call.
 :obj:`~aiosfpubsub.PasswordAuthenticator` uses the `username
 password flow <password_auth_>`_, which Salesforce discourages for new
 integrations:
@@ -131,6 +131,31 @@ from a secret store rather than from a file.
 The ``sandbox`` argument of every flow but the client credentials one selects
 ``test.salesforce.com`` instead of ``login.salesforce.com``; for the JWT
 Bearer flow it also selects the matching ``aud`` claim.
+
+:obj:`~aiosfpubsub.SOAPAuthenticator` is the odd one out: it uses the SOAP
+API's `login() <soap_login_>`_ call rather than OAuth, and so needs no
+connected app at all. It exchanges a username and a password for a session
+ID, which the Pub/Sub API accepts in place of an access token. This is what
+Salesforce's own Pub/Sub API reference client does:
+
+.. code-block:: python
+
+    SOAPAuthenticator(
+        username="...", password="...", security_token="..."
+    )
+
+The security token is appended to the password, and is required unless the
+caller's IP falls inside the trusted IP range of the user's profile. Pass
+``domain`` to log in against a My Domain host instead of
+``login.salesforce.com``.
+
+.. warning::
+
+    ``login()`` is already unavailable in SOAP API version 65.0 and later,
+    and Salesforce `retires it <soap_login_retirement_>`_ from versions 31.0
+    through 64.0 in the Summer '27 release. Use
+    :obj:`~aiosfpubsub.JWTBearerAuthenticator` or
+    :obj:`~aiosfpubsub.ClientCredentialsAuthenticator` for new integrations.
 
 Publishing
 ----------

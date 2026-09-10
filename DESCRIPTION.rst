@@ -26,6 +26,7 @@ Features
 - Replay fallback for replay ids that aged out of the retention window.
 - Streaming publish, and cancellable subscriptions.
 - Authenticators matching aiosfstream_ for an easy migration, including the
-  OAuth 2.0 Client Credentials and JWT Bearer flows.
+  OAuth 2.0 Client Credentials and JWT Bearer flows, and the SOAP login()
+  call for orgs without a connected app.
 
 .. include:: global.rst

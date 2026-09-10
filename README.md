@@ -19,7 +19,8 @@ older Salesforce Streaming API (CometD).
 - Change Data Capture header bitmaps expanded into field names.
 - Streaming publish, and cancellable subscriptions.
 - Authenticators matching `aiosfstream` for easy migration, including the
-  OAuth 2.0 Client Credentials and JWT Bearer flows.
+  OAuth 2.0 Client Credentials and JWT Bearer flows, and the SOAP `login()`
+  call for orgs without a connected app.
 
 ## Installation
 
@@ -204,8 +205,8 @@ async for response in client.publish_stream(topic, batches()):
 ## Migration from `aiosfstream`
 
 - **Authentication:** `PasswordAuthenticator`, `RefreshTokenAuthenticator`,
-  `ClientCredentialsAuthenticator` and `JWTBearerAuthenticator` take the same
-  arguments as before.
+  `ClientCredentialsAuthenticator`, `JWTBearerAuthenticator` and
+  `SOAPAuthenticator` take the same arguments as before.
 - **Client:** replace `SalesforceStreamingClient` with
   `SalesforcePubSubClient`, which takes an authenticator rather than
   credentials directly.

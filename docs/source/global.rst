@@ -14,6 +14,8 @@
 .. _client_credentials_auth: https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_client_credentials_flow.htm&type=5
 .. _jwt_auth: https://help.salesforce.com/s/articleView?id=xcloud.remoteaccess_oauth_jwt_flow.htm&type=5
 .. _pyjwt: https://pyjwt.readthedocs.io/
+.. _soap_login: https://developer.salesforce.com/docs/atlas.en-us.api.meta/api/sforce_api_calls_login.htm
+.. _soap_login_retirement: https://help.salesforce.com/s/articleView?id=release-notes.rn_api_upcoming_retirement_258rn.htm&type=5
 .. _my_domain: https://help.salesforce.com/s/articleView?id=sf.domain_name_overview.htm&type=5
 .. _managed_subscriptions: https://developer.salesforce.com/docs/platform/pub-sub-api/guide/managed-sub.html
 .. _proto: https://github.com/developerforce/pub-sub-api

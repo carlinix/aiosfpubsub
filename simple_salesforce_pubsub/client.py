@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import random
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterable
 from enum import Enum, auto, unique
@@ -34,6 +35,9 @@ from .replay import (
 DEFAULT_ENDPOINT = "api.pubsub.salesforce.com:7443"
 DEFAULT_NUM_REQUESTED = 10
 DEFAULT_AUTH_RETRIES = 3
+DEFAULT_RECONNECT_RETRIES = 5
+DEFAULT_RETRY_BACKOFF = 1.0
+DEFAULT_RETRY_BACKOFF_MAX = 60.0
 #: Trailing metadata key carrying the Salesforce error code of a failed RPC
 REPLAY_ERROR_TRAILER = "error-code"
 #: Error code prefix Salesforce reports for a replay id it will not accept
@@ -170,6 +174,9 @@ class SalesforcePubSubClient:
         replay_fallback: ReplayOption | None = None,
         num_requested: int = DEFAULT_NUM_REQUESTED,
         auth_retries: int = DEFAULT_AUTH_RETRIES,
+        reconnect_retries: int = DEFAULT_RECONNECT_RETRIES,
+        retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+        retry_backoff_max: float = DEFAULT_RETRY_BACKOFF_MAX,
     ) -> None:
         """
         :param authenticator: An authenticator object
@@ -192,11 +199,20 @@ class SalesforcePubSubClient:
         :param num_requested: The number of events to request from the \
         server at a time. The subscription iterators replenish this budget \
         as events are consumed, which is what applies backpressure.
-        :param auth_retries: How many times in a row :meth:`subscribe` may \
+        :param auth_retries: How many times in a row a subscription may \
         re-authenticate and resume before giving up. The count is reset \
         whenever a resumed subscription delivers an event, so it only bounds \
         failures the re-authentication can't fix, such as revoked \
         credentials.
+        :param reconnect_retries: How many times in a row a subscription may \
+        be re-established after the server closes its stream without it \
+        delivering an event. Reset the same way as ``auth_retries``, so a \
+        healthy long-lived subscription reconnects indefinitely while a \
+        broken one gives up.
+        :param retry_backoff: Base delay in seconds before a retry. \
+        Successive attempts double it, up to ``retry_backoff_max``, and each \
+        delay is jittered.
+        :param retry_backoff_max: Ceiling for the retry delay in seconds.
         :raise TypeError: If *authenticator* or *replay* is of an \
         unsupported type
         """
@@ -224,6 +240,12 @@ class SalesforcePubSubClient:
         self.num_requested = num_requested
         #: Consecutive re-authentication attempts allowed before giving up
         self.auth_retries = auth_retries
+        #: Consecutive unproductive reconnections allowed before giving up
+        self.reconnect_retries = reconnect_retries
+        #: Base delay in seconds before a retry
+        self.retry_backoff = retry_backoff
+        #: Ceiling for the retry delay in seconds
+        self.retry_backoff_max = retry_backoff_max
         self.channel: grpc.aio.Channel | None = None
         self.stub: pb2_grpc.PubSubStub | None = None
         self._schema_cache: dict[str, Any] = {}
@@ -272,6 +294,27 @@ class SalesforcePubSubClient:
         exc_tb: TracebackType | None,
     ) -> None:
         await self.close()
+
+    def backoff_delay(self, attempt: int) -> float:
+        """Seconds to wait before the given retry *attempt*
+
+        Salesforce recommends retrying long-lived RPC calls with exponential
+        backoff. The delay doubles with each consecutive attempt up to
+        ``retry_backoff_max``, and full jitter is applied so that many
+        clients recovering from the same outage don't retry in lockstep.
+        Override this for a deterministic schedule.
+
+        :param attempt: The 1-based number of consecutive failed attempts
+        :return: The delay in seconds
+        """
+        ceiling = min(self.retry_backoff_max, self.retry_backoff * 2 ** (attempt - 1))
+        return random.uniform(0, ceiling)
+
+    async def _wait_before_retry(self, attempt: int) -> None:
+        """Sleep for :meth:`backoff_delay` before retry *attempt*"""
+        delay = self.backoff_delay(attempt)
+        LOGGER.debug("Retrying in %.2fs, attempt %d.", delay, attempt)
+        await asyncio.sleep(delay)
 
     def _get_stub(self) -> pb2_grpc.PubSubStub:
         """Return the stub, checking that the client is open
@@ -383,8 +426,17 @@ class SalesforcePubSubClient:
         subscription originally started at, so events are not dropped by a
         policy or a storage which has nothing recorded yet.
 
-        Iteration ends when :meth:`unsubscribe` is called for *topic_name*, or
-        when the client is closed.
+        A ``Subscribe`` stream is long lived but not permanent: the server
+        closes it if the event budget stays exhausted for about a minute, and
+        Salesforce's guidance is to call ``Subscribe`` again. The subscription
+        therefore re-establishes itself, resuming from where it was. A stream
+        that delivered events reconnects at once; one that did not is retried
+        with an exponential backoff and gives up after ``reconnect_retries``
+        consecutive attempts, so a permanently broken subscription raises
+        instead of reconnecting forever.
+
+        Iteration therefore ends only when :meth:`unsubscribe` is called for
+        *topic_name*, or when the client is closed.
 
         :param topic_name: Name of the topic, such as \
         ``/event/My_Event__e`` or ``/data/AccountChangeEvent``
@@ -413,6 +465,7 @@ class SalesforcePubSubClient:
         slot = _StreamSlot()
         self._streams[topic_name] = slot
         attempts = 0
+        reconnects = 0
         fallback_used = False
         try:
             while True:
@@ -423,7 +476,6 @@ class SalesforcePubSubClient:
                     ):
                         delivered = True
                         yield event
-                    return
                 except _SubscriptionCancelled:
                     return
                 except _AuthenticationExpired as error:
@@ -441,6 +493,7 @@ class SalesforcePubSubClient:
                         topic_name,
                     )
                     await self.authenticator.authenticate()
+                    await self._wait_before_retry(attempts)
                 except _ReplayIdRejected as error:
                     if fallback is None or fallback_used:
                         raise ClientError(
@@ -456,6 +509,21 @@ class SalesforcePubSubClient:
                     fallback_used = True
                     await self.replay_storage.clear_replay_marker(topic_name)
                     state.restart((fallback.value, b""))
+                else:
+                    # The server closed the stream. A Subscribe stream is
+                    # meant to be long lived, so this is never a normal end:
+                    # the client is expected to call Subscribe again.
+                    reconnects = 0 if delivered else reconnects + 1
+                    if reconnects > self.reconnect_retries:
+                        raise ClientError(
+                            f"The subscription to {topic_name!r} was closed by "
+                            f"the server {self.reconnect_retries} times without "
+                            f"delivering an event."
+                        )
+                    LOGGER.info("Stream for %r closed, re-establishing.", topic_name)
+                    if not delivered:
+                        await self._wait_before_retry(reconnects)
+                    continue
         finally:
             if self._streams.get(topic_name) is slot:
                 del self._streams[topic_name]
@@ -822,6 +890,11 @@ class ManagedSubscription:
         holds it, which is the point of a managed subscription. Commits queued
         but not yet acknowledged survive the restart.
 
+        A stream the server closes is re-established the same way
+        :meth:`SalesforcePubSubClient.subscribe` does, bounded by
+        ``reconnect_retries``, so iteration ends only on
+        :meth:`cancel` or when the client is closed.
+
         :raise ClientInvalidOperation: If the client is not open, or if a \
         subscription is already registered under this one's :obj:`name`
         :raise AuthenticationError: If re-authentication fails, or if the \
@@ -837,6 +910,7 @@ class ManagedSubscription:
             )
         client._streams[self.name] = self._slot
         attempts = 0
+        reconnects = 0
         try:
             while True:
                 delivered = False
@@ -844,7 +918,6 @@ class ManagedSubscription:
                     async for event in self._iterate_once():
                         delivered = True
                         yield event
-                    return
                 except _SubscriptionCancelled:
                     return
                 except _AuthenticationExpired as error:
@@ -861,6 +934,19 @@ class ManagedSubscription:
                     )
                     await client.authenticator.authenticate()
                     self._requeue_pending_commits()
+                    await client._wait_before_retry(attempts)
+                else:
+                    reconnects = 0 if delivered else reconnects + 1
+                    if reconnects > client.reconnect_retries:
+                        raise ClientError(
+                            f"The subscription to {self.name!r} was closed by "
+                            f"the server {client.reconnect_retries} times "
+                            f"without delivering an event."
+                        )
+                    LOGGER.info("Stream for %r closed, re-establishing.", self.name)
+                    self._requeue_pending_commits()
+                    if not delivered:
+                        await client._wait_before_retry(reconnects)
         finally:
             if client._streams.get(self.name) is self._slot:
                 del client._streams[self.name]

@@ -181,12 +181,44 @@ subscription down rather than filling memory:
     # or, for one subscription
     client.subscribe(topic, num_requested=100)
 
-Re-authentication
------------------
+Reconnection
+------------
 
-When the server rejects the access token, the authenticator runs again and the
-subscription is re-established with the fresh token, without the consumer's
-loop noticing.
+A subscription outlives the stream carrying it. Both
+:meth:`~SalesforcePubSubClient.subscribe` and
+:meth:`~SalesforcePubSubClient.managed_subscribe` re-establish themselves in
+two situations, without the consumer's loop noticing:
+
+- The server rejects the access token. The authenticator runs again and the
+  stream reopens with the new token.
+- The server closes the stream. A ``Subscribe`` stream is long lived but not
+  permanent — it is closed if the event budget stays exhausted for about a
+  minute — and Salesforce's guidance is to call ``Subscribe`` again.
+
+Iteration therefore ends only when you stop the subscription or close the
+client. It does not end because the connection did.
+
+A stream that delivered events reconnects at once. One that did not is retried
+with an exponential backoff, doubling from ``retry_backoff`` up to
+``retry_backoff_max`` with jitter, and gives up after ``auth_retries`` or
+``reconnect_retries`` consecutive attempts:
+
+.. code-block:: python
+
+    client = SalesforcePubSubClient(
+        auth,
+        reconnect_retries=10,
+        retry_backoff=0.5,
+        retry_backoff_max=30.0,
+    )
+
+Both counters reset as soon as a re-established stream delivers an event, so a
+healthy long-lived subscription reconnects indefinitely while a permanently
+broken one raises instead of retrying forever. Override
+:meth:`~SalesforcePubSubClient.backoff_delay` for a different schedule.
+
+Where a subscription resumes
+----------------------------
 
 A :meth:`~SalesforcePubSubClient.subscribe` subscription resumes from the
 stored marker, or, when the storage holds none, from the position it
@@ -204,11 +236,6 @@ option and drop everything published in between.
     carries events and none of them is committed, no position precedes them,
     so the subscription restarts from :obj:`~ReplayOption.NEW_EVENTS`. Commit
     as you go, or start from a stored marker, if that matters to you.
-
-The number of consecutive attempts is bounded by ``auth_retries``, and the
-count resets whenever a re-established subscription delivers an event. Routine
-token expiry therefore never exhausts it, while credentials that have been
-revoked fail quickly instead of hammering the token endpoint.
 
 Stopping a subscription
 -----------------------

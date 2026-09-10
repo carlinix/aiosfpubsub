@@ -79,9 +79,16 @@ class CallStub:
     asserted on without the stub ever blocking on an empty request queue.
     """
 
-    def __init__(self, responses, error=None):
+    def __init__(self, responses, error=None, end_with="cancel"):
+        """
+        :param end_with: what happens once the responses run out -
+            "cancel" mimics the consumer stopping the subscription, which is
+            the only clean end; "close" mimics the server closing the stream,
+            which the client answers by re-establishing it.
+        """
         self.responses = list(responses)
         self.error = error
+        self.end_with = end_with
         self.requests = []
         self.cancelled = False
 
@@ -106,10 +113,10 @@ class CallStub:
                     break
                 yield response
                 await self._settle()
-            if self.cancelled:
-                raise RpcErrorStub(grpc.StatusCode.CANCELLED, "cancelled")
             if self.error is not None:
                 raise self.error
+            if self.cancelled or self.end_with == "cancel":
+                raise RpcErrorStub(grpc.StatusCode.CANCELLED, "cancelled")
         finally:
             pump.cancel()
 
@@ -135,6 +142,8 @@ def client():
     instance = SalesforcePubSubClient(AuthenticatorStub(), replay={})
     instance.stub = MagicMock()
     instance._schema_cache["schema-1"] = {"type": "record", "name": "E", "fields": []}
+    # keep retries instant and deterministic; the schedule is tested separately
+    instance.backoff_delay = lambda attempt: 0.0
     return instance
 
 
@@ -718,7 +727,8 @@ async def test_publish_stream_encodes_every_batch(client):
         [
             pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x01")]),
             pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x02")]),
-        ]
+        ],
+        end_with="close",
     )
     client.stub.PublishStream = call
 
@@ -1119,7 +1129,8 @@ async def test_publish_stream_does_not_raise_on_rejected_records(client):
         results=[pb2.PublishResult(error=pb2.Error(code=pb2.PUBLISH, msg="nope"))]
     )
     client.stub.PublishStream = CallStub(
-        [rejected, pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x02")])]
+        [rejected, pb2.PublishResponse(results=[pb2.PublishResult(replay_id=b"\x02")])],
+        end_with="close",
     )
 
     async def batches():
@@ -1225,3 +1236,168 @@ async def test_an_unknown_acknowledgement_clears_nothing(client):
         pass
 
     assert subscription.pending_commits == {"first": b"\x01"}
+
+
+def test_backoff_delay_doubles_and_is_capped():
+    client = SalesforcePubSubClient(
+        AuthenticatorStub(), retry_backoff=2.0, retry_backoff_max=10.0
+    )
+
+    with patch("simple_salesforce_pubsub.client.random.uniform", lambda _, high: high):
+        ceilings = [client.backoff_delay(attempt) for attempt in range(1, 6)]
+
+    assert ceilings == [2.0, 4.0, 8.0, 10.0, 10.0]
+
+
+def test_backoff_delay_is_jittered():
+    client = SalesforcePubSubClient(AuthenticatorStub(), retry_backoff=4.0)
+    seen = {client.backoff_delay(3) for _ in range(50)}
+
+    assert len(seen) > 1
+    assert all(0.0 <= delay <= 16.0 for delay in seen)
+
+
+@pytest.mark.asyncio
+async def test_wait_before_retry_sleeps_for_the_backoff(client):
+    client.backoff_delay = lambda attempt: 1.5 * attempt
+
+    with patch(
+        "simple_salesforce_pubsub.client.asyncio.sleep", new=AsyncMock()
+    ) as sleep:
+        await client._wait_before_retry(2)
+
+    sleep.assert_awaited_once_with(3.0)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_reconnects_when_the_server_closes_the_stream(client):
+    """A Subscribe stream is long lived; a clean end is not a normal end"""
+    closed = CallStub([fetch_response([consumer_event(b"\x01")])], end_with="close")
+    reopened = CallStub([fetch_response([consumer_event(b"\x02")])])
+    client.stub.Subscribe = call_sequence(closed, reopened)
+
+    events = [event async for event in client.subscribe("/event/X__e")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
+    # the reopened stream resumes after the last event it had delivered
+    assert reopened.requests[0].replay_preset == pb2.CUSTOM
+    assert reopened.requests[0].replay_id == b"\x01"
+
+
+@pytest.mark.asyncio
+async def test_a_productive_stream_reconnects_without_waiting(client):
+    delays = []
+    client._wait_before_retry = AsyncMock(side_effect=lambda a: delays.append(a))
+    client.stub.Subscribe = call_sequence(
+        CallStub([fetch_response([consumer_event(b"\x01")])], end_with="close"),
+        CallStub([fetch_response([consumer_event(b"\x02")])]),
+    )
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert delays == []
+
+
+@pytest.mark.asyncio
+async def test_an_unproductive_stream_backs_off_before_reconnecting(client):
+    delays = []
+    client._wait_before_retry = AsyncMock(side_effect=lambda a: delays.append(a))
+    client.stub.Subscribe = call_sequence(
+        CallStub([], end_with="close"),
+        CallStub([], end_with="close"),
+        CallStub([fetch_response([consumer_event(b"\x01")])]),
+    )
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    # the attempt number grows, which is what widens the backoff
+    assert delays == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_gives_up_after_unproductive_reconnects(client):
+    """Bounded, so a permanently broken subscription cannot loop forever"""
+    client.reconnect_retries = 2
+    client.stub.Subscribe = lambda *args, **kwargs: CallStub([], end_with="close")(
+        *args, **kwargs
+    )
+
+    with pytest.raises(ClientError, match="closed by the server 2 times"):
+        async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+            pass
+
+
+@pytest.mark.asyncio
+async def test_delivering_an_event_resets_the_reconnect_count(client):
+    client.reconnect_retries = 1
+    client.stub.Subscribe = call_sequence(
+        CallStub([], end_with="close"),
+        CallStub([fetch_response([consumer_event(b"\x01")])], end_with="close"),
+        CallStub([], end_with="close"),
+        CallStub([fetch_response([consumer_event(b"\x02")])]),
+    )
+
+    events = [event async for event in client.subscribe("/event/X__e")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
+
+
+@pytest.mark.asyncio
+async def test_reauthentication_backs_off(client):
+    delays = []
+    client._wait_before_retry = AsyncMock(side_effect=lambda a: delays.append(a))
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([fetch_response([consumer_event(b"\x01")])]),
+    )
+
+    async for _ in client.subscribe("/event/X__e"):
+        pass
+
+    assert delays == [1]
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_reconnects_when_the_server_closes_the_stream(client):
+    closed = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])],
+        end_with="close",
+    )
+    reopened = CallStub([pb2.ManagedFetchResponse(events=[consumer_event(b"\x02")])])
+    client.stub.ManagedSubscribe = call_sequence(closed, reopened)
+
+    events = [event async for event in client.managed_subscribe(developer_name="sub")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
+    assert reopened.requests[0].developer_name == "sub"
+
+
+@pytest.mark.asyncio
+async def test_managed_reconnect_resends_unacknowledged_commits(client):
+    client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
+    closed = CallStub(
+        [pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])],
+        end_with="close",
+    )
+    reopened = CallStub([])
+    client.stub.ManagedSubscribe = call_sequence(closed, reopened)
+
+    subscription = client.managed_subscribe(developer_name="sub")
+    async for event in subscription:
+        await subscription.commit(event["replay_id"])
+
+    assert reopened.requests[1].commit_replay_id_request.replay_id == b"\x01"
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_gives_up_after_unproductive_reconnects(client):
+    client.reconnect_retries = 1
+    client.stub.ManagedSubscribe = lambda *args, **kwargs: CallStub(
+        [], end_with="close"
+    )(*args, **kwargs)
+
+    with pytest.raises(ClientError, match="closed by the server 1 times"):
+        async for _ in client.managed_subscribe(developer_name="sub"):
+            pass  # pragma: no cover

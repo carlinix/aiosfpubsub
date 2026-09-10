@@ -124,6 +124,24 @@ The Pub/Sub API has no error code for this condition, so it is recognised from
 the gRPC status. Override `SalesforcePubSubClient.is_replay_id_error()` if the
 server wording changes.
 
+### Reconnection
+
+A subscription outlives the stream carrying it. It re-establishes itself when
+the server rejects the access token and when the server closes the stream — a
+`Subscribe` stream is closed if the event budget stays exhausted for about a
+minute — so the `async for` loop ends only when you stop the subscription or
+close the client, not because the connection did.
+
+A stream that delivered events reconnects at once; one that did not is retried
+with exponential backoff and gives up after a bounded number of consecutive
+attempts, so a permanently broken subscription raises instead of looping:
+
+```python
+client = SalesforcePubSubClient(
+    auth, reconnect_retries=10, retry_backoff=0.5, retry_backoff_max=30.0
+)
+```
+
 ### Stopping a subscription
 
 ```python

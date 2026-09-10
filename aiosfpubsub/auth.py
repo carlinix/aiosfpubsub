@@ -1,8 +1,11 @@
 """Authenticator class implementations"""
 
 import reprlib
+import time
 from abc import ABC, abstractmethod
 from http import HTTPStatus
+from os import PathLike
+from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession
@@ -10,8 +13,21 @@ from aiohttp.client_exceptions import ClientError as AiohttpClientError
 
 from .exceptions import AuthenticationError
 
+try:
+    import jwt
+except ImportError:  # pragma: no cover
+    jwt = None  # type: ignore[assignment]
+
 TOKEN_URL = "https://login.salesforce.com/services/oauth2/token"
 SANDBOX_TOKEN_URL = "https://test.salesforce.com/services/oauth2/token"
+AUDIENCE_URL = "https://login.salesforce.com"
+SANDBOX_AUDIENCE_URL = "https://test.salesforce.com"
+JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+JWT_ALGORITHM = "RS256"
+#: Lifetime of a JWT assertion in seconds. The assertion is used once, right
+#: after it is signed, so a short window costs nothing and limits the value of
+#: a leaked assertion.
+JWT_EXPIRATION = 180
 
 
 class AuthenticatorBase(ABC):
@@ -304,6 +320,128 @@ class ClientCredentialsAuthenticator(AuthenticatorBase):
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
+            }
+            response = await session.post(self._token_url, data=data)
+            return response.status, await response.json()
+
+
+class JWTBearerAuthenticator(AuthenticatorBase):
+    """Authenticator for using the OAuth 2.0 JWT Bearer Flow
+
+    No password and no client secret ever reach the wire. The client proves \
+    its identity by signing a short lived assertion with the private key \
+    whose certificate is uploaded to the Salesforce app definition, and the \
+    user named by *username* has to be pre-authorized for that app.
+
+    Signing requires `PyJWT <https://pyjwt.readthedocs.io/>`_ with its \
+    cryptography backend, which is not a hard dependency of this package. \
+    Install it with the ``jwt`` extra::
+
+        pip install aiosfpubsub[jwt]
+    """
+
+    def __init__(
+        self,
+        consumer_key: str,
+        username: str,
+        private_key: str | bytes | None = None,
+        private_key_path: str | PathLike[str] | None = None,
+        audience: str | None = None,
+        expiration: int = JWT_EXPIRATION,
+        sandbox: bool = False,
+    ) -> None:
+        """
+        :param consumer_key: Consumer key from the Salesforce external \
+        client app or connected app definition
+        :param username: Salesforce username of the user that the \
+        integration acts as
+        :param private_key: The RSA private key in PEM format, matching the \
+        certificate uploaded to the app definition. Mutually exclusive with \
+        *private_key_path*
+        :param private_key_path: Path of a file holding the RSA private key \
+        in PEM format. The file is read on initialization. Mutually \
+        exclusive with *private_key*
+        :param audience: Value of the assertion's ``aud`` claim. The default \
+        is :py:data:`AUDIENCE_URL`, or :py:data:`SANDBOX_AUDIENCE_URL` if \
+        *sandbox* is ``True``. Pass the site's URL to authenticate against \
+        an Experience Cloud site
+        :param expiration: Lifetime of the assertion in seconds
+        :param sandbox: Marks whether the authentication has to be done \
+        for a sandbox org or for a production org
+        :raise ImportError: If PyJWT is not installed
+        :raise ValueError: If neither or both of *private_key* and \
+        *private_key_path* are given, or if *expiration* is not positive
+        """
+        if jwt is None:
+            raise ImportError(
+                "The JWT Bearer flow requires PyJWT with its cryptography "
+                "backend. Install it with the 'jwt' extra: "
+                "pip install aiosfpubsub[jwt]"
+            )
+        if (private_key is None) == (private_key_path is None):
+            raise ValueError(
+                "exactly one of private_key and private_key_path is required"
+            )
+        if expiration <= 0:
+            raise ValueError(f"expiration must be positive, got {expiration!r}")
+
+        super().__init__(sandbox=sandbox)
+        #: OAuth2 client id
+        self.client_id = consumer_key
+        #: Salesforce username
+        self.username = username
+        #: The RSA private key in PEM format. Read eagerly from \
+        #: *private_key_path*, so that a missing or unreadable key fails here \
+        #: rather than on the first authentication attempt, and so that no \
+        #: blocking file access happens while authenticating
+        self.private_key: str | bytes = (
+            private_key
+            if private_key is not None
+            else Path(private_key_path).read_bytes()  # type: ignore[arg-type]
+        )
+        #: Value of the assertion's ``aud`` claim
+        self.audience = audience if audience is not None else self._default_audience
+        #: Lifetime of the assertion in seconds
+        self.expiration = expiration
+
+    @property
+    def _default_audience(self) -> str:
+        """The audience matching the org that :py:attr:`~_token_url` points at"""
+        if self._sandbox:
+            return SANDBOX_AUDIENCE_URL
+        return AUDIENCE_URL
+
+    def __repr__(self) -> str:
+        """Formal string representation
+
+        The private key is omitted rather than shortened, since an
+        abbreviated key would still disclose part of the secret.
+        """
+        cls_name = type(self).__name__
+        return (
+            f"{cls_name}(consumer_key={reprlib.repr(self.client_id)}, "
+            f"username={reprlib.repr(self.username)}, "
+            f"audience={reprlib.repr(self.audience)})"
+        )
+
+    def _create_assertion(self) -> str:
+        """Create a signed JWT assertion for the token request
+
+        :return: The encoded assertion
+        """
+        claims = {
+            "iss": self.client_id,
+            "sub": self.username,
+            "aud": self.audience,
+            "exp": int(time.time()) + self.expiration,
+        }
+        return jwt.encode(claims, self.private_key, algorithm=JWT_ALGORITHM)
+
+    async def _authenticate(self) -> tuple[int, dict[str, Any]]:
+        async with ClientSession() as session:
+            data = {
+                "grant_type": JWT_BEARER_GRANT_TYPE,
+                "assertion": self._create_assertion(),
             }
             response = await session.post(self._token_url, data=data)
             return response.status, await response.json()

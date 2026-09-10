@@ -73,7 +73,7 @@ Each event is a mapping:
 Authenticating
 --------------
 
-Three OAuth 2.0 flows are supported.
+Four OAuth 2.0 flows are supported.
 :obj:`~aiosfpubsub.PasswordAuthenticator` uses the `username
 password flow <password_auth_>`_, which Salesforce discourages for new
 integrations:
@@ -109,8 +109,28 @@ host, so the domain is required and ``login`` and ``test`` are rejected:
         consumer_key="...", consumer_secret="...", domain="mycompany.my"
     )
 
-The ``sandbox`` argument of the first two selects ``test.salesforce.com``
-instead of ``login.salesforce.com``.
+:obj:`~aiosfpubsub.JWTBearerAuthenticator` uses the `JWT Bearer flow
+<jwt_auth_>`_, the flow Salesforce recommends for server-to-server
+integrations. It sends neither a password nor a consumer secret: the client
+signs a short lived assertion with an RSA private key, whose certificate is
+uploaded to the app definition, and the user named by ``username`` has to be
+pre-authorized for that app. Signing requires PyJWT_ with its cryptography
+backend, which comes with the ``jwt`` extra
+(``pip install aiosfpubsub[jwt]``):
+
+.. code-block:: python
+
+    JWTBearerAuthenticator(
+        consumer_key="...", username="...", private_key_path="/path/to/server.key"
+    )
+
+The key can also be passed directly as a PEM formatted string, with the
+``private_key`` argument, which is the more convenient option when it is read
+from a secret store rather than from a file.
+
+The ``sandbox`` argument of every flow but the client credentials one selects
+``test.salesforce.com`` instead of ``login.salesforce.com``; for the JWT
+Bearer flow it also selects the matching ``aud`` claim.
 
 Publishing
 ----------

@@ -21,5 +21,7 @@ First release.
 - Replay fallback for replay ids outside the retention window.
 - Publishing, one request at a time or over a stream, with per-record
   failures reported through :obj:`~aiosfpubsub.PublishError`.
-- ``PasswordAuthenticator``, ``RefreshTokenAuthenticator`` and
-  ``ClientCredentialsAuthenticator``.
+- ``PasswordAuthenticator``, ``RefreshTokenAuthenticator``,
+  ``ClientCredentialsAuthenticator`` and ``JWTBearerAuthenticator``. The
+  JWT Bearer flow signs its assertion with PyJWT, which comes with the
+  ``jwt`` extra: ``pip install aiosfpubsub[jwt]``.

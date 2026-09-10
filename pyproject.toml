@@ -39,6 +39,11 @@ dependencies = [
     "protobuf>=7.35.1",
 ]
 
+[project.optional-dependencies]
+jwt = [
+    "pyjwt[crypto]>=2.8,<3",
+]
+
 [[project.authors]]
 name = "Ricardo Carlini Sperandio"
 email = "rcarlini@gmail.com"
@@ -63,6 +68,7 @@ proto = [
 ]
 test = [
     "coverage[toml]>=7.10,<8",
+    "pyjwt[crypto]>=2.8,<3",
     "pytest>=8.4,<10",
     "pytest-asyncio>=1.1,<2",
 ]

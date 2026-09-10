@@ -12,6 +12,8 @@
 .. _password_auth: https://help.salesforce.com/articleView?id=remoteaccess_oauth_username_password_flow.htm&type=5
 .. _refresh_auth: https://help.salesforce.com/articleView?id=remoteaccess_oauth_refresh_token_flow.htm&type=5
 .. _client_credentials_auth: https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_client_credentials_flow.htm&type=5
+.. _jwt_auth: https://help.salesforce.com/s/articleView?id=xcloud.remoteaccess_oauth_jwt_flow.htm&type=5
+.. _pyjwt: https://pyjwt.readthedocs.io/
 .. _my_domain: https://help.salesforce.com/s/articleView?id=sf.domain_name_overview.htm&type=5
 .. _managed_subscriptions: https://developer.salesforce.com/docs/platform/pub-sub-api/guide/managed-sub.html
 .. _proto: https://github.com/developerforce/pub-sub-api

@@ -1,0 +1,17 @@
+.. _aiohttp: https://github.com/aio-libs/aiohttp/
+.. _aiosfstream: https://github.com/carlinix/aiosfstream/
+.. _asyncio: https://docs.python.org/3/library/asyncio.html
+.. _api: https://developer.salesforce.com/docs/platform/pub-sub-api/overview
+.. _gRPC: https://grpc.io/
+.. _CometD: https://cometd.org/
+.. _fastavro: https://github.com/fastavro/fastavro
+.. _Avro: https://avro.apache.org/
+.. _PlatformEvents: https://developer.salesforce.com/docs/atlas.en-us.platform_events.meta/platform_events/platform_events_intro.htm
+.. _ChangeDataCapture: https://developer.salesforce.com/docs/atlas.en-us.change_data_capture.meta/change_data_capture/cdc_intro.htm
+.. _connected_app: https://help.salesforce.com/articleView?id=connected_app_overview.htm&type=5
+.. _password_auth: https://help.salesforce.com/articleView?id=remoteaccess_oauth_username_password_flow.htm&type=5
+.. _refresh_auth: https://help.salesforce.com/articleView?id=remoteaccess_oauth_refresh_token_flow.htm&type=5
+.. _client_credentials_auth: https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_client_credentials_flow.htm&type=5
+.. _my_domain: https://help.salesforce.com/s/articleView?id=sf.domain_name_overview.htm&type=5
+.. _managed_subscriptions: https://developer.salesforce.com/docs/platform/pub-sub-api/guide/managed-sub.html
+.. _proto: https://github.com/developerforce/pub-sub-api

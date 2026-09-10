@@ -138,11 +138,20 @@ subscription, and `client.subscriptions` lists them.
 ### Publishing
 
 ```python
-result = await client.publish("/event/Your_Platform_Event__e", [{"Field__c": "value"}])
+response = await client.publish(
+    "/event/Your_Platform_Event__e", [{"Field__c": "value"}]
+)
 ```
 
+A publish request can half succeed, with one result per record, so a rejected
+record raises `PublishError`. The whole response is kept on the exception —
+that is where the accepted records' replay ids are. Pass
+`raise_on_error=False` to inspect the response yourself.
+
 To publish repeatedly over a single stream, pass an asynchronous iterable of
-record batches:
+record batches. Rejected records do not raise here, since tearing down a
+long-lived stream over one bad batch defeats its purpose; inspect each
+response, or pass one to `client.raise_for_results()`:
 
 ```python
 async def batches():
@@ -179,13 +188,24 @@ async for response in client.publish_stream(topic, batches()):
 
 ## Development
 
+The project is managed with `uv`:
+
 ```bash
-python -m venv venv
-venv/bin/python -m pip install -e ".[dev]"
-venv/bin/python -m ruff check .
-venv/bin/python -m coverage run -m pytest
-venv/bin/python -m coverage report
+uv sync --all-groups
+uv run ruff check . && uv run ruff format --check .
+uv run coverage run -m pytest
+uv run coverage report
+uv run sphinx-build -b html -W docs/source docs/build/html
+```
+
+## Documentation
+
+```bash
+uv run sphinx-build -b html -W docs/source docs/build/html
 ```
 
 ## License
-MIT
+
+MIT. `auth.py` and `replay.py` are derived from
+[`aiosfstream`](https://github.com/carlinix/aiosfstream), originally by
+Róbert Márki, whose copyright notice is retained in `LICENSE.txt`.

@@ -634,7 +634,6 @@ class SalesforcePubSubClient:
         except grpc.aio.AioRpcError as error:
             raise ClientError(f"Publish failed: {error.details()}") from error
 
-
     async def publish_stream(
         self,
         topic_name: str,
@@ -796,9 +795,7 @@ class ManagedSubscription:
         except grpc.aio.AioRpcError as error:
             if error.code() is grpc.StatusCode.CANCELLED:
                 return
-            raise ClientError(
-                f"Managed subscribe failed: {error.details()}"
-            ) from error
+            raise ClientError(f"Managed subscribe failed: {error.details()}") from error
         finally:
             if client._streams.get(self.name) is self._slot:
                 del client._streams[self.name]

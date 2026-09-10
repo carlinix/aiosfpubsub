@@ -16,7 +16,7 @@ venv/bin/python -m coverage run -m pytest    # tests with branch coverage
 venv/bin/python -m coverage report
 ```
 
-`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from both ruff and coverage. `ruff format` is deliberately **not** used — the sibling project lints without formatting, and `E` already enforces the line length.
+`asyncio_mode = "strict"`, so every async test needs an explicit `@pytest.mark.asyncio`. The suite is at 100% branch coverage of the hand-written modules; the generated `pubsub_api_pb2*.py` are excluded from both ruff and coverage. `ruff format` is used — the sibling project's CI enforces `ruff format --check`, so run `venv/bin/python -m ruff format .` before committing.
 
 ## Architecture
 

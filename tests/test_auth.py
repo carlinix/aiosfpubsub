@@ -49,7 +49,7 @@ def session_returning(status, payload):
 
 
 def test_token_url_depends_on_sandbox():
-    assert AuthenticatorStub().  _token_url == TOKEN_URL
+    assert AuthenticatorStub()._token_url == TOKEN_URL
     assert AuthenticatorStub(sandbox=True)._token_url == SANDBOX_TOKEN_URL
 
 
@@ -176,8 +176,14 @@ async def test_client_credentials_authenticator_uses_the_my_domain_host():
 
 @pytest.mark.parametrize(
     "domain",
-    ["", "   ", "https://mycompany.my.salesforce.com", "mycompany.my.salesforce.com",
-     "login", "test"],
+    [
+        "",
+        "   ",
+        "https://mycompany.my.salesforce.com",
+        "mycompany.my.salesforce.com",
+        "login",
+        "test",
+    ],
 )
 def test_client_credentials_authenticator_rejects_bad_domains(domain):
     with pytest.raises(ValueError):

@@ -230,9 +230,7 @@ async def test_automatic_policy_stores_marker_of_consumed_events(client):
 
 @pytest.mark.asyncio
 async def test_automatic_policy_advances_on_keepalive(client):
-    client.stub.Subscribe = CallStub(
-        [fetch_response(latest_replay_id=b"\x07")]
-    )
+    client.stub.Subscribe = CallStub([fetch_response(latest_replay_id=b"\x07")])
 
     async for _ in client.subscribe("/event/X__e"):
         pass
@@ -257,9 +255,7 @@ async def test_manual_policy_stores_nothing_until_committed(client):
 @pytest.mark.asyncio
 async def test_manual_policy_ignores_keepalive(client):
     client.replay_storage_policy = ReplayMarkerStoragePolicy.MANUAL
-    client.stub.Subscribe = CallStub(
-        [fetch_response(latest_replay_id=b"\x07")]
-    )
+    client.stub.Subscribe = CallStub([fetch_response(latest_replay_id=b"\x07")])
 
     async for _ in client.subscribe("/event/X__e"):  # pragma: no cover - no events
         pass
@@ -524,9 +520,7 @@ async def test_keepalive_does_not_anchor_after_an_event_was_delivered(client):
 @pytest.mark.asyncio
 async def test_resume_without_a_storing_storage(client):
     """ConstantReplayId stores nothing, so the resume position is in memory"""
-    client = SalesforcePubSubClient(
-        AuthenticatorStub(), replay=ReplayOption.ALL_EVENTS
-    )
+    client = SalesforcePubSubClient(AuthenticatorStub(), replay=ReplayOption.ALL_EVENTS)
     client.stub = MagicMock()
     client._schema_cache["schema-1"] = {"type": "record", "name": "E", "fields": []}
     expired = CallStub(

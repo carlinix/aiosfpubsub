@@ -39,13 +39,13 @@ The package was renamed from `simple-salesforce-pubsub` on 2026-09-10. That name
 
 ### Purpose and reference implementation
 
-This package is the successor to the user's own `aiosfstream` (CometD Streaming API client), retargeted at Salesforce's gRPC **Pub/Sub API** (https://developer.salesforce.com/docs/platform/pub-sub-api/overview). The reference implementation lives at **`/home/ricardo-sperandio/Projects/aiosfstream`** — read it before designing any new surface here.
+This package is the successor to the user's own `aiosfstream` (CometD Streaming API client), retargeted at Salesforce's gRPC **Pub/Sub API** (https://developer.salesforce.com/docs/platform/pub-sub-api/overview). The reference implementation is [`carlinix/aiosfstream`](https://github.com/carlinix/aiosfstream) — read it before designing any new surface here. It is usually checked out alongside this repository.
 
 Names and argument shapes mirror `aiosfstream` wherever the semantics survive the transport change (`PasswordAuthenticator`, `ClientCredentialsAuthenticator`, `ReplayOption`, `MappingStorage`, `ReplayMarkerStoragePolicy`), so migration is mostly mechanical. **The client surface is still not API-compatible**: `aiosfstream.Client` is async-iterable with `subscribe`/`unsubscribe` multiplexed over one CometD connection, whereas `SalesforcePubSubClient.subscribe()` returns one async generator per topic, each backed by its own gRPC stream, and there is no `unsubscribe` — you stop iterating.
 
 ### Conventions come from the sibling project
 
-`/home/ricardo-sperandio/Projects/aiosfstream` is the house style, and this project now mirrors it: `uv_build` backend with `module-root = ""` (the package sits at the repo root, not under `src/`), `uv.lock`, dependency groups, ruff config, pytest config, branch coverage, `py.typed`, `docs/source` layout with `.readthedocs.yaml`, and a `ci.yml` of the same shape.
+`aiosfstream` is the house style, and this project now mirrors it: `uv_build` backend with `module-root = ""` (the package sits at the repo root, not under `src/`), `uv.lock`, dependency groups, ruff config, pytest config, branch coverage, `py.typed`, `docs/source` layout with `.readthedocs.yaml`, and a `ci.yml` of the same shape.
 
 `LICENSE.txt` carries **two** copyright lines. `auth.py` and `replay.py` are derived from aiosfstream, originally by Róbert Márki, so his notice is retained alongside the user's. Don't drop it.
 

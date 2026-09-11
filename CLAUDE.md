@@ -21,10 +21,7 @@ work is being discussed in.
 
 ## Environment & Commands
 
-The project is managed with `uv`, which owns `.venv`. A stale `venv/` from
-before the migration may still be in the working tree — it holds an editable
-install and tooling that no longer match `uv.lock`. It is gitignored and safe
-to delete; never run anything from it.
+The project is managed with `uv`, which owns `.venv`.
 
 ```bash
 uv sync --all-groups                              # create/refresh .venv

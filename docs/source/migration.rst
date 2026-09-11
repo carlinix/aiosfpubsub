@@ -14,7 +14,9 @@ Authenticators
 Unchanged. :obj:`PasswordAuthenticator`,
 :obj:`RefreshTokenAuthenticator`, :obj:`ClientCredentialsAuthenticator`,
 :obj:`JWTBearerAuthenticator` and :obj:`SOAPAuthenticator` take the same
-arguments as before.
+arguments as before. As in aiosfstream 1.4.0, :obj:`PasswordAuthenticator`
+also accepts ``domain``, naming the login host directly: ``login``, ``test``,
+or a My Domain such as ``mycompany.my``.
 
 Client
 ------

@@ -52,6 +52,33 @@ SOAP_LOGIN_ENVELOPE = (
 )
 
 
+def _resolve_login_domain(domain: str | None, sandbox: bool) -> str:
+    """Determine the host to log in against
+
+    Shared by the flows that accept any Salesforce login host: ``login``,
+    ``test``, or an org's My Domain.
+
+    :param domain: An explicit domain, or ``None`` to derive one from \
+    *sandbox*
+    :param sandbox: Marks whether a sandbox org is being addressed
+    :return: The validated domain
+    :raise ValueError: If *domain* cannot name a Salesforce host
+    """
+    if domain is None:
+        return SANDBOX_LOGIN_DOMAIN if sandbox else LOGIN_DOMAIN
+
+    value = domain.strip().strip("/")
+    if not value:
+        raise ValueError("domain must not be empty")
+    if "://" in value:
+        raise ValueError(f"domain must be a bare domain name, not a URL: {domain!r}")
+    if value.endswith(".salesforce.com"):
+        raise ValueError(
+            f"domain must not carry the .salesforce.com suffix: {domain!r}"
+        )
+    return value
+
+
 class AuthenticatorBase(ABC):
     """Abstract base class to serve as a base for implementing concrete
     authenticators"""
@@ -171,6 +198,7 @@ class PasswordAuthenticator(AuthenticatorBase):
         username: str,
         password: str,
         sandbox: bool = False,
+        domain: str | None = None,
     ) -> None:
         """
         :param consumer_key: Consumer key from the Salesforce connected \
@@ -181,6 +209,12 @@ class PasswordAuthenticator(AuthenticatorBase):
         :param password: Salesforce password
         :param sandbox: Marks whether the authentication has to be done \
         for a sandbox org or for a production org
+        :param domain: The host to request tokens from, without a scheme and \
+        without the ``.salesforce.com`` suffix, such as ``mycompany.my``. \
+        The default is :py:data:`LOGIN_DOMAIN`, or \
+        :py:data:`SANDBOX_LOGIN_DOMAIN` if *sandbox* is ``True``
+        :raise ValueError: If *domain* is empty, looks like a URL, or \
+        carries the ``.salesforce.com`` suffix
         """
         super().__init__(sandbox=sandbox)
         #: OAuth2 client id
@@ -191,6 +225,13 @@ class PasswordAuthenticator(AuthenticatorBase):
         self.username = username
         #: Salesforce password
         self.password = password
+        #: The host that token requests are sent to
+        self.domain = _resolve_login_domain(domain, sandbox)
+
+    @property
+    def _token_url(self) -> str:
+        """The URL that should be used for token requests"""
+        return f"https://{self.domain}.salesforce.com/services/oauth2/token"
 
     def __repr__(self) -> str:
         """Formal string representation"""
@@ -528,33 +569,7 @@ class SOAPAuthenticator(AuthenticatorBase):
         #: The user's security token
         self.security_token = security_token
         #: The host that login requests are sent to
-        self.domain = self._resolve_domain(domain, sandbox)
-
-    @staticmethod
-    def _resolve_domain(domain: str | None, sandbox: bool) -> str:
-        """Determine the host to log in against
-
-        :param domain: An explicit domain, or ``None`` to derive one from \
-        *sandbox*
-        :param sandbox: Marks whether a sandbox org is being addressed
-        :return: The validated domain
-        :raise ValueError: If *domain* cannot name a Salesforce host
-        """
-        if domain is None:
-            return SANDBOX_LOGIN_DOMAIN if sandbox else LOGIN_DOMAIN
-
-        value = domain.strip().strip("/")
-        if not value:
-            raise ValueError("domain must not be empty")
-        if "://" in value:
-            raise ValueError(
-                f"domain must be a bare domain name, not a URL: {domain!r}"
-            )
-        if value.endswith(".salesforce.com"):
-            raise ValueError(
-                f"domain must not carry the .salesforce.com suffix: {domain!r}"
-            )
-        return value
+        self.domain = _resolve_login_domain(domain, sandbox)
 
     @property
     def _token_url(self) -> str:

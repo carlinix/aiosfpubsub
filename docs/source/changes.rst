@@ -1,6 +1,16 @@
 Changelog
 =========
 
+0.2.0 (2026-09-11)
+------------------
+
+- ``PasswordAuthenticator`` accepts a ``domain`` argument naming the host to
+  request tokens from: ``login``, ``test``, or an org's My Domain such as
+  ``mycompany.my``. It follows the same rules as ``SOAPAuthenticator``,
+  whose validation it now shares: without it the ``sandbox`` flag decides
+  as before, and an explicit value wins over ``sandbox``. This mirrors
+  aiosfstream 1.4.0.
+
 0.1.0 (2026-09-10)
 ------------------
 

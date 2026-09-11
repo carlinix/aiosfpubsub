@@ -88,6 +88,11 @@ integrations:
         sandbox=True,
     )
 
+Pass ``domain`` to request the token from a specific host instead:
+``login``, ``test``, or an org's `My Domain <my_domain_>`_ such as
+``mycompany.my``, without a scheme and without the ``.salesforce.com``
+suffix. An explicit ``domain`` wins over ``sandbox``.
+
 :obj:`~aiosfpubsub.RefreshTokenAuthenticator` uses the `refresh
 token flow <refresh_auth_>`_, with a refresh token you obtained earlier:
 
@@ -130,7 +135,9 @@ from a secret store rather than from a file.
 
 The ``sandbox`` argument of every flow but the client credentials one selects
 ``test.salesforce.com`` instead of ``login.salesforce.com``; for the JWT
-Bearer flow it also selects the matching ``aud`` claim.
+Bearer flow it also selects the matching ``aud`` claim. The password and SOAP
+flows also accept ``domain``, which names the host directly and wins over
+``sandbox``.
 
 :obj:`~aiosfpubsub.SOAPAuthenticator` is the odd one out: it uses the SOAP
 API's `login() <soap_login_>`_ call rather than OAuth, and so needs no

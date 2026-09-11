@@ -172,6 +172,66 @@ async def test_password_authenticator_sends_the_password_grant():
     }
 
 
+def test_password_authenticator_defaults_to_the_login_host():
+    authenticator = PasswordAuthenticator("key", "secret", "user", "pass")
+
+    assert authenticator.domain == LOGIN_DOMAIN
+    assert authenticator._token_url == TOKEN_URL
+
+
+def test_password_authenticator_sandbox_uses_the_test_host():
+    authenticator = PasswordAuthenticator("key", "secret", "user", "pass", sandbox=True)
+
+    assert authenticator.domain == SANDBOX_LOGIN_DOMAIN
+    assert authenticator._token_url == SANDBOX_TOKEN_URL
+
+
+@pytest.mark.parametrize(
+    ("domain", "url"),
+    [
+        ("login", TOKEN_URL),
+        ("test", SANDBOX_TOKEN_URL),
+        (
+            " mycompany.my/ ",
+            "https://mycompany.my.salesforce.com/services/oauth2/token",
+        ),
+    ],
+)
+def test_password_authenticator_explicit_domain_wins_over_sandbox(domain, url):
+    authenticator = PasswordAuthenticator(
+        "key", "secret", "user", "pass", sandbox=True, domain=domain
+    )
+
+    assert authenticator._token_url == url
+
+
+@pytest.mark.parametrize(
+    ("domain", "message"),
+    [
+        ("", "must not be empty"),
+        ("https://mycompany.my.salesforce.com", "not a URL"),
+        ("mycompany.my.salesforce.com", "salesforce.com"),
+    ],
+)
+def test_password_authenticator_rejects_bad_domains(domain, message):
+    with pytest.raises(ValueError, match=message):
+        PasswordAuthenticator("key", "secret", "user", "pass", domain=domain)
+
+
+@pytest.mark.asyncio
+async def test_password_authenticator_posts_to_the_my_domain_host():
+    authenticator = PasswordAuthenticator(
+        "key", "secret", "user", "pass", domain="mycompany.my"
+    )
+    patcher, session = session_returning(HTTPStatus.OK, TOKEN_RESPONSE)
+    with patcher:
+        await authenticator.authenticate()
+
+    assert session.post.await_args.args[0] == (
+        "https://mycompany.my.salesforce.com/services/oauth2/token"
+    )
+
+
 @pytest.mark.asyncio
 async def test_refresh_token_authenticator_sends_the_refresh_grant():
     authenticator = RefreshTokenAuthenticator(

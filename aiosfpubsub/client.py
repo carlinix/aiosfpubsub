@@ -20,6 +20,7 @@ from .auth import AuthenticatorBase
 from .cdc import expand_change_event_header
 from .exceptions import (
     AuthenticationError,
+    AuthenticationNetworkError,
     ClientError,
     ClientInvalidOperation,
     PublishError,
@@ -264,8 +265,10 @@ class SalesforcePubSubClient:
     async def open(self) -> None:
         """Authenticate and establish a connection with the Pub/Sub API
 
+        :raise AuthenticationNetworkError: If the token endpoint can't be \
+        reached; safe to retry
         :raise AuthenticationError: If the server rejects the authentication \
-        request or if a network failure occurs during the authentication
+        request
         """
         await self.authenticator.authenticate()
         LOGGER.info(
@@ -458,9 +461,10 @@ class SalesforcePubSubClient:
         :param replay_fallback: Overrides the client's ``replay_fallback``
         :raise ClientInvalidOperation: If the client is not open, or if \
         *topic_name* is already subscribed to
-        :raise AuthenticationError: If re-authentication fails, or if the \
-        server keeps rejecting the call metadata after ``auth_retries`` \
-        consecutive attempts
+        :raise AuthenticationError: If re-authentication is rejected, or if \
+        the server keeps rejecting the call metadata after ``auth_retries`` \
+        consecutive attempts. A network failure while re-authenticating \
+        counts as one such attempt instead of ending the subscription
         :raise ClientError: If the subscription gets rejected by the server
         :raise SchemaError: If an event's schema can't be fetched or parsed
         """
@@ -511,7 +515,7 @@ class SalesforcePubSubClient:
                     # token endpoint at full speed
                     if not delivered:
                         await self._wait_before_retry(attempts)
-                    await self.authenticator.authenticate()
+                    await self._reauthenticate(topic_name)
                 except _ReplayIdRejected as error:
                     if fallback is None or fallback_used:
                         raise ClientError(
@@ -545,6 +549,24 @@ class SalesforcePubSubClient:
         finally:
             if self._streams.get(topic_name) is slot:
                 del self._streams[topic_name]
+
+    async def _reauthenticate(self, name: str) -> None:
+        """Renew the credentials of a subscription whose token was rejected
+
+        A network failure is not final: the stream reopens with the current
+        credentials, is rejected again, and the next attempt re-authenticates
+        after the usual backoff, all bounded by ``auth_retries``.
+
+        :raise AuthenticationError: If the server rejects the credentials
+        """
+        try:
+            await self.authenticator.authenticate()
+        except AuthenticationNetworkError as error:
+            LOGGER.warning(
+                "Re-authentication for %r failed with a network error (%s), retrying.",
+                name,
+                error.__cause__ or error,
+            )
 
     async def _subscribe_once(
         self,
@@ -915,8 +937,9 @@ class ManagedSubscription:
 
         :raise ClientInvalidOperation: If the client is not open, or if a \
         subscription is already registered under this one's :obj:`name`
-        :raise AuthenticationError: If re-authentication fails, or if the \
-        server keeps rejecting the call metadata
+        :raise AuthenticationError: If re-authentication is rejected, or if \
+        the server keeps rejecting the call metadata. A network failure \
+        while re-authenticating counts as one attempt instead
         :raise ClientError: If the subscription gets rejected by the server
         :raise SchemaError: If an event's schema can't be fetched or parsed
         """
@@ -952,7 +975,7 @@ class ManagedSubscription:
                     )
                     if not delivered:
                         await client._wait_before_retry(attempts)
-                    await client.authenticator.authenticate()
+                    await client._reauthenticate(self.name)
                     self._requeue_pending_commits()
                 else:
                     reconnects = 0 if delivered else reconnects + 1

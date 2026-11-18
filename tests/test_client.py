@@ -16,6 +16,7 @@ from aiosfpubsub.client import (
 )
 from aiosfpubsub.exceptions import (
     AuthenticationError,
+    AuthenticationNetworkError,
     ClientError,
     ClientInvalidOperation,
     PublishError,
@@ -34,6 +35,8 @@ class AuthenticatorStub(AuthenticatorBase):
     def __init__(self):
         super().__init__()
         self.authenticate_calls = 0
+        #: Errors raised by the next calls to authenticate(), in order
+        self.failures = []
         self.access_token = "token"
         self.instance_url = "https://example.my.salesforce.com"
         self.tenant_id = "00D000000000000EAA"
@@ -43,6 +46,8 @@ class AuthenticatorStub(AuthenticatorBase):
 
     async def authenticate(self):
         self.authenticate_calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
         self.access_token = f"token-{self.authenticate_calls}"
 
 
@@ -420,6 +425,51 @@ async def test_subscribe_gives_up_after_repeated_auth_failures(client):
             pass
 
     assert client.authenticator.authenticate_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_subscribe_survives_a_network_failure_while_reauthenticating(client):
+    client.authenticator.failures = [AuthenticationNetworkError("down")]
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([fetch_response([consumer_event(b"\x01")])]),
+    )
+
+    events = [event async for event in client.subscribe("/event/X__e")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01"]
+    assert client.authenticator.authenticate_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_subscribe_counts_network_failures_against_the_auth_retries(client):
+    client.auth_retries = 2
+    client.authenticator.failures = [
+        AuthenticationNetworkError("down"),
+        AuthenticationNetworkError("down"),
+    ]
+    client.stub.Subscribe = lambda *args, **kwargs: CallStub(
+        [], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)
+    )(*args, **kwargs)
+
+    with pytest.raises(AuthenticationError, match="2 consecutive"):
+        async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+            pass
+
+    assert client.authenticator.authenticate_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_subscribe_ends_when_reauthentication_is_rejected(client):
+    client.authenticator.failures = [AuthenticationError("Authentication failed")]
+    client.stub.Subscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+    )
+
+    with pytest.raises(AuthenticationError, match="Authentication failed"):
+        async for _ in client.subscribe("/event/X__e"):  # pragma: no cover
+            pass
 
 
 @pytest.mark.asyncio
@@ -1039,6 +1089,23 @@ async def test_managed_subscribe_reauthenticates_and_resumes(client):
     assert [event["replay_id"] for event in events] == [b"\x01", b"\x02"]
     assert client.authenticator.authenticate_calls == 1
     assert resumed.requests[0].developer_name == "sub"
+
+
+@pytest.mark.asyncio
+async def test_managed_subscribe_survives_a_network_failure_while_reauthenticating(
+    client,
+):
+    client.authenticator.failures = [AuthenticationNetworkError("down")]
+    client.stub.ManagedSubscribe = call_sequence(
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([], error=RpcErrorStub(grpc.StatusCode.UNAUTHENTICATED)),
+        CallStub([pb2.ManagedFetchResponse(events=[consumer_event(b"\x01")])]),
+    )
+
+    events = [event async for event in client.managed_subscribe(developer_name="sub")]
+
+    assert [event["replay_id"] for event in events] == [b"\x01"]
+    assert client.authenticator.authenticate_calls == 2
 
 
 @pytest.mark.asyncio

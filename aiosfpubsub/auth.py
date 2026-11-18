@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape
 from aiohttp import ClientSession
 from aiohttp.client_exceptions import ClientError as AiohttpClientError
 
-from .exceptions import AuthenticationError
+from .exceptions import AuthenticationError, AuthenticationNetworkError
 
 try:
     import jwt
@@ -114,13 +114,15 @@ class AuthenticatorBase(ABC):
     async def authenticate(self) -> None:
         """Called on initialization and after a failed authentication attempt
 
+        :raise AuthenticationNetworkError: If the token endpoint can't be \
+        reached or doesn't answer in time
         :raise AuthenticationError: If the server rejects the authentication \
-        request or if a network failure occurs
+        request
         """
         try:
             status_code, response_data = await self._authenticate()
-        except AiohttpClientError as error:
-            raise AuthenticationError("Network request failed") from error
+        except (AiohttpClientError, TimeoutError) as error:
+            raise AuthenticationNetworkError("Network request failed") from error
 
         if status_code != HTTPStatus.OK:
             self._clear_credentials()

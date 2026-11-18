@@ -24,6 +24,7 @@ from .client import (
 )
 from .exceptions import (
     AuthenticationError,
+    AuthenticationNetworkError,
     ClientError,
     ClientInvalidOperation,
     PublishError,
@@ -45,6 +46,7 @@ except PackageNotFoundError:  # pragma: no cover - source checkout
 
 __all__ = [
     "AuthenticationError",
+    "AuthenticationNetworkError",
     "AuthenticatorBase",
     "ClientCredentialsAuthenticator",
     "ClientError",

@@ -4,6 +4,7 @@ Exception hierarchy::
 
     PubSubException
         AuthenticationError
+            AuthenticationNetworkError
         ClientError
             ClientInvalidOperation
             PublishError
@@ -26,6 +27,17 @@ class PubSubException(Exception):
 
 class AuthenticationError(PubSubException):
     """Authentication failure"""
+
+
+class AuthenticationNetworkError(AuthenticationError):
+    """The token endpoint could not be reached
+
+    Raised for connection failures, DNS resolution errors and timeouts, where
+    the credentials were never checked. Retrying may succeed, whereas a plain
+    :obj:`AuthenticationError` means the server rejected the credentials.
+    It derives from :obj:`AuthenticationError`, so existing handlers still
+    catch it.
+    """
 
 
 class ClientError(PubSubException):

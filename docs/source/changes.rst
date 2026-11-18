@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+0.3.0 (2026-11-18)
+------------------
 
 - New :obj:`~aiosfpubsub.exceptions.AuthenticationNetworkError`, raised when
   the token endpoint can't be reached (connection, DNS or timeout failures),

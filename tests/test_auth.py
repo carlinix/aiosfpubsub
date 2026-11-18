@@ -28,7 +28,7 @@ from aiosfpubsub.auth import (
     RefreshTokenAuthenticator,
     SOAPAuthenticator,
 )
-from aiosfpubsub.exceptions import AuthenticationError
+from aiosfpubsub.exceptions import AuthenticationError, AuthenticationNetworkError
 
 # Generated once: 2048 bit key generation is slow enough to notice when
 # repeated for every test in this module.
@@ -125,11 +125,36 @@ async def test_authenticate_clears_the_token_data_on_rejection():
 
 
 @pytest.mark.asyncio
-async def test_authenticate_translates_network_failures():
-    authenticator = AuthenticatorStub(result=ClientConnectionError("down"))
+@pytest.mark.parametrize("failure", [ClientConnectionError("down"), TimeoutError()])
+async def test_authenticate_translates_network_failures(failure):
+    authenticator = AuthenticatorStub(result=failure)
 
-    with pytest.raises(AuthenticationError, match="Network request failed"):
+    with pytest.raises(AuthenticationNetworkError, match="Network request failed"):
         await authenticator.authenticate()
+
+
+@pytest.mark.asyncio
+async def test_a_network_failure_keeps_the_previous_credentials():
+    authenticator = AuthenticatorStub()
+    await authenticator.authenticate()
+    authenticator.result = ClientConnectionError("down")
+
+    with pytest.raises(AuthenticationNetworkError):
+        await authenticator.authenticate()
+
+    assert authenticator.access_token == "token"
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_is_not_a_network_failure():
+    authenticator = AuthenticatorStub(
+        result=(HTTPStatus.BAD_REQUEST, {"error": "invalid_grant"})
+    )
+
+    with pytest.raises(AuthenticationError) as raised:
+        await authenticator.authenticate()
+
+    assert not isinstance(raised.value, AuthenticationNetworkError)
 
 
 @pytest.mark.asyncio
@@ -806,7 +831,7 @@ async def test_soap_authenticator_rejects_a_non_xml_response(soap_authenticator)
 async def test_soap_authenticator_translates_network_failures(soap_authenticator):
     with (
         patch("aiosfpubsub.auth.ClientSession", side_effect=ClientConnectionError()),
-        pytest.raises(AuthenticationError, match="Network request failed"),
+        pytest.raises(AuthenticationNetworkError, match="Network request failed"),
     ):
         await soap_authenticator.authenticate()
 

@@ -77,6 +77,9 @@ Exceptions
 .. autoexception:: AuthenticationError
     :members:
 
+.. autoexception:: AuthenticationNetworkError
+    :members:
+
 .. autoexception:: ClientError
     :members:
 

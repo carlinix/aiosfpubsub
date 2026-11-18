@@ -1,6 +1,19 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- New :obj:`~aiosfpubsub.exceptions.AuthenticationNetworkError`, raised when
+  the token endpoint can't be reached (connection, DNS or timeout failures),
+  so a caller can retry it and still treat a rejected credential as final.
+  It derives from :obj:`~aiosfpubsub.exceptions.AuthenticationError`, so
+  existing handlers keep working. Timeouts were previously not translated
+  at all.
+- A network failure while re-authenticating an expired subscription no
+  longer ends it: it counts as one of the ``auth_retries`` attempts and the
+  subscription retries after the usual backoff.
+
 0.2.0 (2026-09-11)
 ------------------
 

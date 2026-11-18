@@ -101,7 +101,7 @@ Both are supported, and they are deliberately separate entry points because mana
 
 `subscribe()` wraps `_subscribe_once()` in a loop that handles three ways a stream can end, and returns only on cancellation:
 
-- **`UNAUTHENTICATED`** → `_AuthenticationExpired`: the authenticator runs again and the stream reopens with **fresh call metadata**, the only supported way to present a new token. `FetchRequest.auth_refresh` looks like it exists for this and does not — the proto marks it "For internal Salesforce use only" in all three messages that carry it. Do not wire it up.
+- **`UNAUTHENTICATED`** → `_AuthenticationExpired`: the authenticator runs again and the stream reopens with **fresh call metadata**, the only supported way to present a new token. `FetchRequest.auth_refresh` looks like it exists for this and does not — the proto marks it "For internal Salesforce use only" in all three messages that carry it. Do not wire it up. Re-authentication goes through `_reauthenticate()`, which swallows `AuthenticationNetworkError` (unreachable token endpoint) so the next stream is rejected again and the attempt is retried after backoff; a rejected credential (plain `AuthenticationError`) still ends the subscription.
 - **A clean end** (the `else` branch): the server closed the stream, which is never a normal end for a long-lived `Subscribe`. It reopens from the resume position.
 - **`CANCELLED`** → `_SubscriptionCancelled`: `unsubscribe()` or `close()`. This is the only path that returns.
 

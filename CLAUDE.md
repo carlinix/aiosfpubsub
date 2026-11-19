@@ -64,7 +64,7 @@ Names and argument shapes mirror `aiosfstream` wherever the semantics survive th
 
 `LICENSE.txt` carries **two** copyright lines. `auth.py` and `replay.py` are derived from aiosfstream, originally by Róbert Márki, so his notice is retained alongside the user's. Don't drop it.
 
-The one workflow deliberately **not** copied is `release.yml`: the sibling publishes to PyPI and a GCP Artifact Registry under its own package name and secrets, which needs the user's decision on target registry and credentials.
+`release.yml` follows the sibling's shape with one deliberate difference: it has **no PyPI job**, since the name is taken there (see "Remaining gaps"). A tag matching `project.version` builds once, publishes to the `avid-python-packages` GCP Artifact Registry (opt-in via the `ENABLE_GCP_PUBLISH` variable) and attaches the same files to a GitHub Release. Authentication is Workload Identity Federation; the publishing service account only trusts runs triggered from a tag, so a manual run must be started from the tag, and the guard job enforces it.
 
 ### Modules
 
@@ -144,7 +144,6 @@ The proto is explicit that N `CommitReplayRequest`s can be batched into a single
 
 ## Remaining gaps
 
-- **No `release.yml`.** Publishing needs the user's call on target registry and credentials; see "Conventions" above.
 - **`ci.yml` triggers on `main` where the sibling uses `develop`.** The remote now exists — `github.com/carlinix/aiosfpubsub`, created 2026-09-10, which is what `project.urls` points at — and CI runs there green on all nine jobs, so the branch name is the one piece of the sibling's shape this repo deliberately does not copy. Whether to adopt `develop` is still undecided.
 - **The distribution name is taken on PyPI.** `aiosfpubsub` belongs to `bensnyde/aiosfpubsub`, last released 2024-06-29 (0.0.6, 5 releases in one week, 0 stars, Unlicense). **`uv publish` will be rejected.** The plan is a voluntary transfer request to the author; the formal PEP 541 route is a poor fit, since this project is not a fork of that one, alternative names are available, and it has no users yet — three of the five things a requester must demonstrate. If the transfer does not come through, the fallback names verified free on 2026-09-10 are `aiosfeventbus` and `sfpubsub`. Do not publish under a substitute name without asking.
 - **Managed subscriptions are mock-tested only.** They need a Managed Event Subscription configured in a real org, so nothing here has run against Salesforce.

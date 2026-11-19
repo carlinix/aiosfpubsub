@@ -1,6 +1,13 @@
 Changelog
 =========
 
+0.3.1 (2026-11-18)
+------------------
+
+- No library changes. First version published by the new ``release.yml``
+  workflow, which uploads the distributions to the ``avid-python-packages``
+  GCP Artifact Registry and attaches them to a GitHub Release.
+
 0.3.0 (2026-11-18)
 ------------------
 
